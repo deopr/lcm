@@ -1,0 +1,135 @@
+# Example LCM profile.
+#
+# This file is data, not code.  Package names are canonical ids resolved by
+# `lcm` for the target family (Fedora, Debian, Arch).  Run:
+#
+#   lcm check  --target arch --profile examples/workstation.lcm.yaml
+#   lcm plan   --target arch --profile examples/workstation.lcm.yaml
+#   sudo lcm replace --target arch --profile examples/workstation.lcm.yaml
+#
+# or apply it to the machine you are already running:
+#
+#   sudo lcm restore examples/workstation.lcm.yaml --apply
+lcm: 1
+name: workstation
+description: Daily-driver desktop, browser, media and development tools.
+
+source:
+  distro: fedora
+  family: fedora
+
+target:
+  release: ""
+
+users:
+  - name: deopr
+    uid: 1000
+    groups: [wheel, video, audio, input, render, kvm]
+    shell: /bin/bash
+
+packages:
+  native:
+    - firefox
+    - thunderbird
+    - vlc
+    - mpv
+    - gimp
+    - libreoffice
+    - keepassxc
+    - qbittorrent
+    - remmina
+    - virt-manager
+    - podman
+    - distrobox
+    - flatpak
+    - timeshift
+    - borgbackup
+    - rclone
+    - syncthing
+    - wireguard-tools
+    - pipewire
+    - wireplumber
+    - pavucontrol
+    - ffmpeg
+    - neovim
+    - git
+    - tmux
+    - zsh
+    - htop
+    - btop
+    - fastfetch
+    - kitty
+    - ripgrep
+    - fd
+    - fzf
+    - bat
+    - eza
+    - zoxide
+    - starship
+    - jq
+    - tree
+    - ncdu
+    - lm-sensors
+    - smartmontools
+    - gparted
+    - nmap
+    - gdb
+    - cmake
+    - gcc
+    - clang
+    - make
+    - vulkan-tools
+    - inxi
+    - p7zip
+    - unzip
+    - zstd
+    - gnupg
+    - openssh-server
+    - firewalld
+  flatpak:
+    - org.mozilla.firefox
+    - com.valvesoftware.Steam
+    - md.obsidian.Obsidian
+  raw: []
+  exclude:
+    - steam
+
+services:
+  enable:
+    - sshd
+    - firewalld
+    - fstrim.timer
+  disable: []
+
+config:
+  etc:
+    - NetworkManager/system-connections
+    - vconsole.conf
+    - locale.conf
+    - environment
+    - cups/printers.conf
+    - pipewire
+    - wireplumber
+    - X11/xorg.conf.d
+    - ssh/ssh_config.d
+  home:
+    - .config
+    - .local/share/fonts
+    - .local/share/applications
+    - .local/share/icons
+    - .ssh
+    - .bashrc
+    - .zshrc
+    - .gitconfig
+    - .profile
+  never:
+    - .cache
+    - .local/share/Trash
+    - .local/share/Steam
+    - Downloads
+    - Games
+
+validation:
+  require_gpu: true
+  require_audio: true
+  max_failed_units: 0

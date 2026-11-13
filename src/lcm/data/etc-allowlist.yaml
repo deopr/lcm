@@ -1,0 +1,55 @@
+# What may be carried across a distro boundary from /etc.
+#
+# Paths are relative to /etc.  `safe` is copied by default, `review` is copied
+# only when the profile asks for it, and `deny` is never copied.  Distribution
+# identity, bootloader state and package-manager state are intentionally denied:
+# recreating those is the whole point of a clean migration.
+version: 1
+
+safe:
+  - NetworkManager/system-connections
+  - vconsole.conf
+  - locale.conf
+  - environment
+  - cups/printers.conf
+  - cups/client.conf
+  - sane.d
+  - bluetooth/main.conf
+  - pipewire
+  - wireplumber
+  - sysctl.d
+  - udev/rules.d
+  - modprobe.d
+  - X11/xorg.conf.d
+  - gdm/custom.conf
+  - sddm.conf.d
+  - ssh/ssh_config
+  - ssh/ssh_config.d
+
+review:
+  - sudoers.d
+  - security/limits.d
+  - hosts
+  - systemd/system
+  - dnf
+  - apt
+  - pacman.conf
+
+deny:
+  - fstab
+  - crypttab
+  - passwd
+  - shadow
+  - group
+  - gshadow
+  - machine-id
+  - os-release
+  - hostname
+  - resolv.conf
+  - default/grub
+  - grub2
+  - grub.d
+  - kernel
+  - initramfs
+  - dracut.conf
+  - mkinitcpio.conf

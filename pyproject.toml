@@ -1,0 +1,28 @@
+[build-system]
+requires = ["hatchling>=1.24"]
+build-backend = "hatchling.build"
+
+[project]
+name = "lcm"
+version = "0.1.0"
+description = "Linux Continuity Manager - transactional distro replacement with a rollback button"
+readme = "README.md"
+requires-python = ">=3.11"
+license = { text = "MIT" }
+authors = [{ name = "deopr" }]
+keywords = ["linux", "distro", "migration", "btrfs", "installer"]
+classifiers = [
+  "Environment :: Console",
+  "Operating System :: POSIX :: Linux",
+  "Programming Language :: Python :: 3",
+]
+dependencies = ["PyYAML>=6.0"]
+
+[project.scripts]
+lcm = "lcm.cli:main"
+
+[project.optional-dependencies]
+dev = ["pytest>=8"]
+
+[tool.hatch.build.targets.wheel]
+packages = ["src/lcm"]

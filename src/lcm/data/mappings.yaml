@@ -1,0 +1,170 @@
+# LCM canonical package database.
+#
+# Keys are distro-neutral canonical ids.  A profile stores these ids, never
+# distro package names, so the same profile remains valid after a hop.
+#
+# Confidence is about the *name mapping*, not about whether the package
+# exists in your particular release.  `lcm check` reports what it cannot
+# map; it does not silently guess.
+version: 1
+updated: "2026-11-13"
+
+packages:
+  firefox: {fedora: firefox, debian: firefox-esr, ubuntu: firefox, arch: firefox, suse: MozillaFirefox, flatpak: org.mozilla.firefox, note: {debian: "Debian ships Firefox ESR as firefox-esr", ubuntu: "Ubuntu ships the snap-backed firefox package"}}
+  chromium: {fedora: chromium, debian: chromium, arch: chromium, suse: chromium, flatpak: org.chromium.Chromium}
+  thunderbird: {fedora: thunderbird, debian: thunderbird, arch: thunderbird, suse: MozillaThunderbird, flatpak: org.mozilla.Thunderbird}
+  vlc: {fedora: vlc, debian: vlc, arch: vlc, suse: vlc, flatpak: org.videolan.VLC}
+  mpv: {fedora: mpv, debian: mpv, arch: mpv, suse: mpv, flatpak: io.mpv.Mpv}
+  gimp: {fedora: gimp, debian: gimp, arch: gimp, suse: gimp, flatpak: org.gimp.GIMP}
+  inkscape: {fedora: inkscape, debian: inkscape, arch: inkscape, suse: inkscape, flatpak: org.inkscape.Inkscape}
+  blender: {fedora: blender, debian: blender, arch: blender, suse: blender, flatpak: org.blender.Blender}
+  krita: {fedora: krita, debian: krita, arch: krita, suse: krita, flatpak: org.kde.krita}
+  darktable: {fedora: darktable, debian: darktable, arch: darktable, suse: darktable, flatpak: org.darktable.Darktable}
+  obs-studio: {fedora: obs-studio, debian: obs-studio, arch: obs-studio, suse: obs-studio, flatpak: com.obsproject.Studio}
+  audacity: {fedora: audacity, debian: audacity, arch: audacity, suse: audacity, flatpak: org.audacityteam.Audacity}
+  steam: {fedora: steam, debian: steam-installer, arch: steam, suse: steam, flatpak: com.valvesoftware.Steam, note: {fedora: "Fedora needs RPM Fusion", suse: "openSUSE needs Packman", debian: "Debian needs non-free enabled"}}
+  lutris: {fedora: lutris, debian: lutris, arch: lutris, suse: lutris, flatpak: net.lutris.Lutris}
+  bottles: {fedora: bottles, debian: bottles, arch: bottles, flatpak: com.usebottles.bottles}
+  wine: {fedora: wine, debian: wine, arch: wine, suse: wine, flatpak: org.winehq.Wine}
+  gamemode: {fedora: gamemode, debian: gamemode, arch: gamemode, suse: gamemode}
+  mangohud: {fedora: mangohud, debian: mangohud, arch: mangohud, suse: mangohud}
+  discord: {flatpak: com.discordapp.Discord, note: "no distro-neutral native package; Flatpak is the portable choice"}
+  spotify: {flatpak: com.spotify.Client}
+  telegram: {fedora: telegram-desktop, debian: telegram-desktop, arch: telegram-desktop, suse: telegram-desktop, flatpak: org.telegram.desktop}
+  signal: {flatpak: org.signal.Signal}
+  keepassxc: {fedora: keepassxc, debian: keepassxc, arch: keepassxc, suse: keepassxc, flatpak: org.keepassxc.KeePassXC}
+  bitwarden: {flatpak: com.bitwarden.desktop}
+  libreoffice: {fedora: libreoffice, debian: libreoffice, arch: libreoffice, suse: libreoffice, flatpak: org.libreoffice.LibreOffice}
+  onlyoffice: {flatpak: org.onlyoffice.desktopeditors}
+  evince: {fedora: evince, debian: evince, arch: evince, suse: evince, flatpak: org.gnome.Evince}
+  okular: {fedora: okular, debian: okular, arch: okular, suse: okular, flatpak: org.kde.okular}
+  zathura: {fedora: zathura, debian: zathura, arch: zathura, suse: zathura, flatpak: org.pwmt.zathura}
+  qbittorrent: {fedora: qbittorrent, debian: qbittorrent, arch: qbittorrent, suse: qbittorrent, flatpak: org.qbittorrent.qBittorrent}
+  transmission: {fedora: transmission-gtk, debian: transmission-gtk, arch: transmission-gtk, suse: transmission-gtk}
+  remmina: {fedora: remmina, debian: remmina, arch: remmina, suse: remmina, flatpak: org.remmina.Remmina}
+  virt-manager: {fedora: virt-manager, debian: virt-manager, arch: virt-manager, suse: virt-manager, flatpak: org.virt_manager.virt-manager}
+  qemu: {fedora: qemu, debian: qemu-system-x86, arch: qemu-full, suse: qemu}
+  libvirt: {fedora: libvirt, debian: libvirt-daemon-system, arch: libvirt, suse: libvirt}
+  docker: {fedora: docker-ce, debian: docker.io, arch: docker, suse: docker, note: "Fedora needs Docker's own repository"}
+  podman: {fedora: podman, debian: podman, arch: podman, suse: podman}
+  distrobox: {fedora: distrobox, debian: distrobox, arch: distrobox, suse: distrobox}
+  flatpak: {fedora: flatpak, debian: flatpak, arch: flatpak, suse: flatpak}
+  timeshift: {fedora: timeshift, debian: timeshift, arch: timeshift, suse: timeshift}
+  snapper: {fedora: snapper, debian: snapper, arch: snapper, suse: snapper}
+  borgbackup: {fedora: borgbackup, debian: borgbackup, arch: borg, suse: borgbackup}
+  restic: {fedora: restic, debian: restic, arch: restic, suse: restic}
+  rclone: {fedora: rclone, debian: rclone, arch: rclone, suse: rclone}
+  syncthing: {fedora: syncthing, debian: syncthing, arch: syncthing, suse: syncthing}
+  nextcloud-client: {fedora: nextcloud-client, debian: nextcloud-desktop, arch: nextcloud-client, suse: nextcloud}
+  wireguard-tools: {fedora: wireguard-tools, debian: wireguard-tools, arch: wireguard-tools, suse: wireguard-tools}
+  openvpn: {fedora: openvpn, debian: openvpn, arch: openvpn, suse: openvpn}
+  cups: {fedora: cups, debian: cups, arch: cups, suse: cups}
+  hplip: {fedora: hplip, debian: hplip, arch: hplip, suse: hplip}
+  sane: {fedora: sane-backends, debian: sane-utils, arch: sane, suse: sane-backends}
+  pipewire: {fedora: pipewire, debian: pipewire, arch: pipewire, suse: pipewire}
+  wireplumber: {fedora: wireplumber, debian: wireplumber, arch: wireplumber, suse: wireplumber}
+  pavucontrol: {fedora: pavucontrol, debian: pavucontrol, arch: pavucontrol, suse: pavucontrol}
+  easyeffects: {fedora: easyeffects, debian: easyeffects, arch: easyeffects, suse: easyeffects, flatpak: com.github.wwmm.easyeffects}
+  ffmpeg: {fedora: ffmpeg, debian: ffmpeg, arch: ffmpeg, suse: ffmpeg}
+  imagemagick: {fedora: ImageMagick, debian: imagemagick, arch: imagemagick, suse: ImageMagick}
+  neovim: {fedora: neovim, debian: neovim, arch: neovim, suse: neovim, flatpak: io.neovim.nvim}
+  vim: {fedora: vim-enhanced, debian: vim, arch: vim, suse: vim}
+  emacs: {fedora: emacs, debian: emacs, arch: emacs, suse: emacs, flatpak: org.gnu.emacs}
+  git: {fedora: git, debian: git, arch: git, suse: git}
+  git-lfs: {fedora: git-lfs, debian: git-lfs, arch: git-lfs, suse: git-lfs}
+  curl: {fedora: curl, debian: curl, arch: curl, suse: curl}
+  wget: {fedora: wget, debian: wget, arch: wget, suse: wget}
+  rsync: {fedora: rsync, debian: rsync, arch: rsync, suse: rsync}
+  less: {fedora: less, debian: less, arch: less, suse: less}
+  file: {fedora: file, debian: file, arch: file, suse: file}
+  tar: {fedora: tar, debian: tar, arch: tar, suse: tar}
+  gzip: {fedora: gzip, debian: gzip, arch: gzip, suse: gzip}
+  xz: {fedora: xz, debian: xz-utils, arch: xz, suse: xz}
+  bzip2: {fedora: bzip2, debian: bzip2, arch: bzip2, suse: bzip2}
+  zip: {fedora: zip, debian: zip, arch: zip, suse: zip}
+  man-db: {fedora: man-db, debian: man-db, arch: man-db, suse: man}
+  bash-completion: {fedora: bash-completion, debian: bash-completion, arch: bash-completion, suse: bash-completion}
+  sudo: {fedora: sudo, debian: sudo, arch: sudo, suse: sudo}
+  polkit: {fedora: polkit, debian: polkitd, arch: polkit, suse: polkit}
+  openssh-client: {fedora: openssh-clients, debian: openssh-client, arch: openssh, suse: openssh-clients}
+  iproute2: {fedora: iproute, debian: iproute2, arch: iproute2, suse: iproute2}
+  dnsutils: {fedora: bind-utils, debian: bind9-dnsutils, arch: bind, suse: bind-utils}
+  net-tools: {fedora: net-tools, debian: net-tools, arch: net-tools, suse: net-tools}
+  tcpdump: {fedora: tcpdump, debian: tcpdump, arch: tcpdump, suse: tcpdump}
+  traceroute: {fedora: traceroute, debian: traceroute, arch: traceroute, suse: traceroute}
+  socat: {fedora: socat, debian: socat, arch: socat, suse: socat}
+  python3: {fedora: python3, debian: python3, arch: python, suse: python3}
+  perl: {fedora: perl, debian: perl, arch: perl, suse: perl}
+  nano: {fedora: nano, debian: nano, arch: nano, suse: nano}
+  pkg-config: {fedora: pkgconf-pkg-config, debian: pkg-config, arch: pkgconf, suse: pkg-config}
+  meson: {fedora: meson, debian: meson, arch: meson, suse: meson}
+  ninja: {fedora: ninja-build, debian: ninja-build, arch: ninja, suse: ninja}
+  autoconf: {fedora: autoconf, debian: autoconf, arch: autoconf, suse: autoconf}
+  automake: {fedora: automake, debian: automake, arch: automake, suse: automake}
+  libtool: {fedora: libtool, debian: libtool, arch: libtool, suse: libtool}
+  shellcheck: {fedora: ShellCheck, debian: shellcheck, arch: shellcheck, suse: ShellCheck}
+  docker-compose: {fedora: docker-compose, debian: docker-compose, arch: docker-compose, suse: docker-compose}
+  tmux: {fedora: tmux, debian: tmux, arch: tmux, suse: tmux}
+  zsh: {fedora: zsh, debian: zsh, arch: zsh, suse: zsh}
+  fish: {fedora: fish, debian: fish, arch: fish, suse: fish}
+  htop: {fedora: htop, debian: htop, arch: htop, suse: htop}
+  btop: {fedora: btop, debian: btop, arch: btop, suse: btop}
+  fastfetch: {fedora: fastfetch, debian: fastfetch, arch: fastfetch, suse: fastfetch}
+  kitty: {fedora: kitty, debian: kitty, arch: kitty, suse: kitty}
+  alacritty: {fedora: alacritty, debian: alacritty, arch: alacritty, suse: alacritty}
+  wezterm: {fedora: wezterm, debian: wezterm, arch: wezterm, flatpak: org.wezfurlong.wezterm}
+  gnome-tweaks: {fedora: gnome-tweaks, debian: gnome-tweaks, arch: gnome-tweaks, suse: gnome-tweaks}
+  papirus-icon-theme: {fedora: papirus-icon-theme, debian: papirus-icon-theme, arch: papirus-icon-theme, suse: papirus-icon-theme}
+  fira-code-fonts: {fedora: fira-code-fonts, debian: fonts-firacode, arch: ttf-fira-code, suse: fira-code-fonts}
+  networkmanager: {fedora: NetworkManager, debian: network-manager, arch: networkmanager, suse: NetworkManager}
+  firewalld: {fedora: firewalld, debian: firewalld, arch: firewalld, suse: firewalld}
+  openssh-server: {fedora: openssh-server, debian: openssh-server, arch: openssh, suse: openssh}
+  vscode: {fedora: code, debian: code, arch: code, suse: code, flatpak: com.visualstudio.code, note: "needs Microsoft's repository on Fedora/Debian/openSUSE"}
+  rustup: {fedora: rustup, debian: rustup, arch: rustup, suse: rustup}
+  cargo: {fedora: cargo, debian: cargo, arch: cargo, suse: cargo}
+  nodejs: {fedora: nodejs, debian: nodejs, arch: nodejs, suse: nodejs}
+  npm: {fedora: npm, debian: npm, arch: npm, suse: npm}
+  python3-pip: {fedora: python3-pip, debian: python3-pip, arch: python-pip, suse: python3-pip}
+  uv: {fedora: uv, debian: uv, arch: uv, suse: uv}
+  go: {fedora: golang, debian: golang-go, arch: go, suse: go}
+  java: {fedora: java-21-openjdk, debian: openjdk-21-jre, arch: openjdk-21, suse: java-21-openjdk}
+  gh: {fedora: gh, debian: gh, arch: github-cli, suse: gh}
+  lazygit: {fedora: lazygit, debian: lazygit, arch: lazygit, suse: lazygit}
+  ripgrep: {fedora: ripgrep, debian: ripgrep, arch: ripgrep, suse: ripgrep}
+  fd: {fedora: fd-find, debian: fd-find, arch: fd, suse: fd}
+  fzf: {fedora: fzf, debian: fzf, arch: fzf, suse: fzf}
+  bat: {fedora: bat, debian: bat, arch: bat, suse: bat}
+  eza: {fedora: eza, debian: eza, arch: eza, suse: eza}
+  zoxide: {fedora: zoxide, debian: zoxide, arch: zoxide, suse: zoxide}
+  starship: {fedora: starship, debian: starship, arch: starship, suse: starship}
+  jq: {fedora: jq, debian: jq, arch: jq, suse: jq}
+  yq: {fedora: yq, debian: yq, arch: go-yq, suse: yq}
+  tree: {fedora: tree, debian: tree, arch: tree, suse: tree}
+  ncdu: {fedora: ncdu, debian: ncdu, arch: ncdu, suse: ncdu}
+  lm-sensors: {fedora: lm_sensors, debian: lm-sensors, arch: lm_sensors, suse: sensors}
+  smartmontools: {fedora: smartmontools, debian: smartmontools, arch: smartmontools, suse: smartmontools}
+  gparted: {fedora: gparted, debian: gparted, arch: gparted, suse: gparted}
+  gnome-disk-utility: {fedora: gnome-disk-utility, debian: gnome-disk-utility, arch: gnome-disk-utility, suse: gnome-disk-utility}
+  wireshark: {fedora: wireshark, debian: wireshark, arch: wireshark-qt, suse: wireshark, flatpak: org.wireshark.Wireshark}
+  nmap: {fedora: nmap, debian: nmap, arch: nmap, suse: nmap}
+  gdb: {fedora: gdb, debian: gdb, arch: gdb, suse: gdb}
+  cmake: {fedora: cmake, debian: cmake, arch: cmake, suse: cmake}
+  gcc: {fedora: gcc, debian: gcc, arch: gcc, suse: gcc}
+  clang: {fedora: clang, debian: clang, arch: clang, suse: clang}
+  make: {fedora: make, debian: make, arch: make, suse: make}
+  mesa-utils: {fedora: mesa-demos, debian: mesa-utils, arch: mesa-utils, suse: Mesa-demo}
+  vulkan-tools: {fedora: vulkan-tools, debian: vulkan-tools, arch: vulkan-tools, suse: vulkan-tools}
+  nvtop: {fedora: nvtop, debian: nvtop, arch: nvtop, suse: nvtop}
+  radeontop: {fedora: radeontop, debian: radeontop, arch: radeontop, suse: radeontop}
+  inxi: {fedora: inxi, debian: inxi, arch: inxi, suse: inxi}
+  hwinfo: {fedora: hwinfo, debian: hwinfo, arch: hwinfo, suse: hwinfo}
+  p7zip: {fedora: p7zip, debian: p7zip-full, arch: p7zip, suse: p7zip}
+  unzip: {fedora: unzip, debian: unzip, arch: unzip, suse: unzip}
+  zstd: {fedora: zstd, debian: zstd, arch: zstd, suse: zstd}
+  gnupg: {fedora: gnupg2, debian: gnupg, arch: gnupg, suse: gpg2}
+  pass: {fedora: pass, debian: pass, arch: pass, suse: pass}
+  age: {fedora: age, debian: age, arch: age, suse: age}
+  tailscale: {fedora: tailscale, debian: tailscale, arch: tailscale, suse: tailscale}
+  zerotier: {fedora: zerotier-one, debian: zerotier-one, arch: zerotier-one, suse: zerotier-one}
+  virtualbox: {fedora: VirtualBox, debian: virtualbox, arch: virtualbox, suse: virtualbox}
+  gnome-boxes: {fedora: gnome-boxes, debian: gnome-boxes, arch: gnome-boxes, suse: gnome-boxes}
