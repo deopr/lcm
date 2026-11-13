@@ -86,7 +86,49 @@ Safety properties:
 - extraction refuses absolute paths, `..`, device nodes, FIFOs and top-level
   links; absolute symlinks inside a payload are skipped with a note,
 - every file is checksummed and verified before use,
-- unreadable source files are skipped rather than aborting the export.
+- unreadable source files are skipped rather than aborting the export,
+- `--full-home` can include browser profiles, SSH/GPG keys and other
+  credentials; treat the bundle like a password vault.
+
+## What survives the hop
+
+`replace` and `restore` solve different halves of the move:
+
+- **`replace` on the same machine** builds a new distro next to the old one and
+  **reuses `/home` completely**. Every personal file stays because it is never
+  copied or recreated. The old root remains bootable until `commit`.
+- **`export` → `restore` on another machine or after a wipe** carries what the
+  profile lists. The default is dotfiles and application config; add
+  `--full-home` when you want personal files too.
+
+| What | `replace` (same machine) | `export` → `restore` (default) | `export --full-home` → `restore` |
+| --- | --- | --- | --- |
+| Dotfiles, shell rc files, `.config`, fonts/icons/themes | kept | included | included |
+| Documents, Pictures, Videos, Music, Projects | kept | not included | included |
+| Other app data such as `.thunderbird`, `.var/app`, `.steam` | kept | not included | included |
+| Caches, Trash, `Downloads`, `Games`, Steam/lutris libraries | kept | excluded | excluded |
+| `.ssh` keys | kept | included | included |
+| `.gnupg` keyring | kept | not included | included |
+| `/etc` allowlist (for example NetworkManager connections) | not copied to the new distro; snapshotted in the pre-replace bundle | included, with per-file backups | included, with per-file backups |
+| Package selection | mapped and installed | mapped and installed | mapped and installed |
+| Exact package versions, third-party repos, AUR state | not preserved | not preserved | not preserved |
+| `/var/lib`, databases, Docker images, VMs | untouched on the old root | not included | not included |
+| Users and passwords | users recreated with the same UID and password hash | mapped onto the existing human account when possible; a missing account may be created without the old password | same |
+
+`--full-home` becomes an allowlist of `.` and skips the usual junk:
+`.cache`, `.local/share/Trash`, `.local/share/Steam`, `.local/share/lutris`,
+`Downloads`, `Games`, `.lcm-backup`, and common browser/Electron cache
+directories. Add specific paths with repeatable `--include-home`:
+
+```sh
+lcm export ~/lcm-backup.lcmb --include-home Documents --include-home Projects
+lcm export ~/lcm-full.lcmb --full-home
+```
+
+A bundle is a continuity snapshot, not a disk image. It does not clone
+`/var/lib`, package versions, third-party repositories, container images or
+non-allowlisted `/etc` state. Treat it as "my setup and my files", not "the
+whole disk".
 
 ## Commands
 
@@ -106,7 +148,9 @@ verdict; read the verdict line.
 ### Capture this machine
 
 ```sh
-lcm export ~/lcm-backup.lcmb               # full bundle (packages + dotfiles)
+lcm export ~/lcm-backup.lcmb               # packages + dotfiles/config allowlist
+lcm export ~/lcm-full.lcmb --full-home     # also carry personal files
+lcm export ~/lcm-backup.lcmb --include-home Projects --include-home Documents
 lcm export ~/meta.lcmb --no-payload        # metadata only
 lcm export ~/for-arch.lcmb --target arch   # preview mapping for a target
 ```
@@ -120,6 +164,7 @@ lcm restore ~/lcm-backup.lcmb                    # dry run
 sudo lcm restore ~/lcm-backup.lcmb --apply --yes # do it
 sudo lcm restore ~/lcm-backup.lcmb --apply --step packages
 sudo lcm restore my.lcm.yaml --apply             # profile only, no file payload
+sudo lcm import  ~/lcm-backup.lcmb --apply --yes # same as restore
 ```
 
 - packages are attempted as a batch, then one by one; missing names are

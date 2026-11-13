@@ -83,12 +83,35 @@ def cmd_plan(args: argparse.Namespace) -> int:
     return 0
 
 
+def _apply_home_options(profile, args: argparse.Namespace) -> None:
+    """Expand the profile's home allowlist for a complete user-data move."""
+    if getattr(args, "full_home", False):
+        profile.config.home = ["."]
+        profile.config.never = sorted(
+            {*profile_mod.DEFAULT_NEVER, *profile.config.never}
+        )
+    extras = list(getattr(args, "include_home", None) or [])
+    if not extras:
+        return
+    cleaned: list[str] = []
+    for item in extras:
+        candidate = Path(item).expanduser()
+        if candidate.is_absolute() or ".." in candidate.parts:
+            raise LcmError(
+                "--include-home paths must be relative to the user's home "
+                f"(got {item!r})"
+            )
+        cleaned.append(str(candidate))
+    profile.config.home = sorted({*profile.config.home, *cleaned})
+
+
 def cmd_export(args: argparse.Namespace) -> int:
     system = detect.detect_system()
     database = mapping.Database()
     profile, capture = _profile_for(args, system, database)
     if args.name:
         profile.name = args.name
+    _apply_home_options(profile, args)
     target = args.target or system.distro.id
     assessment = assess.analyze(system, target, database, profile, capture)
 
@@ -321,11 +344,25 @@ def build_parser() -> argparse.ArgumentParser:
     export.add_argument("--target", help="target distro id for the mapping preview")
     export.add_argument("--profile", help="start from an existing profile")
     export.add_argument("--no-payload", action="store_true", help="metadata only")
+    export.add_argument(
+        "--full-home",
+        action="store_true",
+        help="include the whole home, excluding caches, Trash, Downloads and games",
+    )
+    export.add_argument(
+        "--include-home",
+        action="append",
+        default=[],
+        metavar="PATH",
+        help="extra home-relative path to include (repeatable)",
+    )
     _add_json(export)
     export.set_defaults(func=cmd_export)
 
     restore_cmd = sub.add_parser(
-        "restore", help="apply a .lcmb/.lcm bundle or .lcm.yaml profile"
+        "restore",
+        aliases=["import"],
+        help="apply a .lcmb/.lcm bundle or .lcm.yaml profile",
     )
     restore_cmd.add_argument(
         "bundle", help=".lcmb/.lcm bundle or .lcm/.lcm.yaml profile"

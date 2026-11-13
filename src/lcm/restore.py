@@ -60,12 +60,19 @@ def _parse_steps(value: str | None) -> tuple[str, ...]:
 
 
 def _never(name: str, patterns: list[str]) -> bool:
+    """Match a path and each of its components against the patterns.
+
+    Single-component patterns such as `Cache` apply at any depth, while
+    multi-component patterns such as `.local/share/Steam` must match a path
+    prefix so every file below that directory is skipped.
+    """
     parts = Path(name).parts
     for pattern in patterns:
-        if any(fnmatch.fnmatch(part, pattern) for part in parts):
-            return True
-        if fnmatch.fnmatch(name, pattern):
-            return True
+        prefix = ""
+        for part in parts:
+            prefix = f"{prefix}/{part}" if prefix else part
+            if fnmatch.fnmatch(part, pattern) or fnmatch.fnmatch(prefix, pattern):
+                return True
     return False
 
 

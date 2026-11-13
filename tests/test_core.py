@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import argparse
 import io
 import tarfile
 import tempfile
@@ -9,8 +10,9 @@ import unittest
 from pathlib import Path
 
 from lcm import bundle, pkgs
-from lcm.cli import _looks_like_bundle
-from lcm.restore import _extract
+from lcm.cli import _apply_home_options, _looks_like_bundle, build_parser
+from lcm.profile import DEFAULT_NEVER
+from lcm.restore import _extract, _never
 from lcm.assess import analyze, needed_space_bytes
 from lcm.detect import (
     Boot,
@@ -276,6 +278,122 @@ class TestBundle(unittest.TestCase):
             problems = bundle.verify(bad)
             self.assertTrue(problems)
             self.assertTrue(any("mismatch" in item for item in problems))
+
+
+class TestHomeCapture(unittest.TestCase):
+    def test_full_home_includes_user_data_and_skips_junk(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            home = Path(tmp) / "home"
+            files = [
+                "Documents/note.txt",
+                "Pictures/pic.png",
+                ".thunderbird/prefs.js",
+                ".config/app/settings.ini",
+                ".local/share/fonts/font.ttf",
+                ".cache/blob/junk",
+                "Downloads/big.iso",
+                "Games/save.dat",
+                ".local/share/Steam/steamapps/game.bin",
+                ".local/share/lutris/game.yml",
+                ".local/share/Trash/files/deleted",
+                ".lcm-backup/stale.tar",
+                ".config/google-chrome/Default/Cache/blob",
+            ]
+            for relative in files:
+                path = home / relative
+                path.parent.mkdir(parents=True, exist_ok=True)
+                path.write_text(relative, encoding="utf-8")
+
+            out = Path(tmp) / "home.tar"
+            bundle._tar_tree(home, ["."], DEFAULT_NEVER, out)
+            with tarfile.open(out) as archive:
+                names = {member.name for member in archive.getmembers()}
+
+            for relative in (
+                "Documents/note.txt",
+                "Pictures/pic.png",
+                ".thunderbird/prefs.js",
+                ".config/app/settings.ini",
+                ".local/share/fonts/font.ttf",
+            ):
+                self.assertIn(relative, names)
+
+            for prefix in (
+                ".cache",
+                "Downloads",
+                "Games",
+                ".local/share/Steam",
+                ".local/share/lutris",
+                ".local/share/Trash",
+                ".lcm-backup",
+                ".config/google-chrome/Default/Cache",
+            ):
+                self.assertFalse(
+                    any(
+                        name == prefix or name.startswith(prefix + "/")
+                        for name in names
+                    ),
+                    f"{prefix} leaked into the full-home capture",
+                )
+
+    def test_never_matches_multi_component_prefix(self):
+        self.assertTrue(_never(".local/share/Steam/apps/x", DEFAULT_NEVER))
+        self.assertTrue(_never(".local/share/Trash/files/x", DEFAULT_NEVER))
+        self.assertFalse(_never(".local/share/fonts/x", DEFAULT_NEVER))
+        self.assertFalse(_never(".cache-notes/x", [".cache"]))
+        self.assertTrue(_never(".config/app/Default/Cache/blob", ["Cache"]))
+
+
+class TestHomeOptions(unittest.TestCase):
+    def test_full_home_replaces_the_allowlist_and_keeps_junk_excludes(self):
+        profile = Profile(config=ConfigSpec(home=[".config"], never=[".cache"]))
+        _apply_home_options(
+            profile, argparse.Namespace(full_home=True, include_home=[])
+        )
+        self.assertEqual(profile.config.home, ["."])
+        self.assertTrue(set(DEFAULT_NEVER).issubset(profile.config.never))
+
+    def test_include_home_adds_relative_paths(self):
+        profile = Profile(config=ConfigSpec(home=[".config"]))
+        _apply_home_options(
+            profile,
+            argparse.Namespace(
+                full_home=False, include_home=["Documents", "Projects/notes"]
+            ),
+        )
+        self.assertEqual(
+            profile.config.home, [".config", "Documents", "Projects/notes"]
+        )
+
+    def test_include_home_rejects_absolute_and_traversal(self):
+        profile = Profile(config=ConfigSpec(home=[".config"]))
+        for bad in ("/etc", "../outside"):
+            with self.assertRaises(LcmError):
+                _apply_home_options(
+                    profile, argparse.Namespace(full_home=False, include_home=[bad])
+                )
+
+
+class TestCliParsing(unittest.TestCase):
+    def test_import_is_an_alias_for_restore(self):
+        args = build_parser().parse_args(["import", "bundle.lcmb"])
+        self.assertEqual(args.func.__name__, "cmd_restore")
+        self.assertEqual(args.bundle, "bundle.lcmb")
+
+    def test_export_full_home_flags(self):
+        args = build_parser().parse_args(
+            [
+                "export",
+                "out.lcmb",
+                "--full-home",
+                "--include-home",
+                "Documents",
+                "--include-home",
+                "Projects",
+            ]
+        )
+        self.assertTrue(args.full_home)
+        self.assertEqual(args.include_home, ["Documents", "Projects"])
 
 
 class TestRestoreFormatDetection(unittest.TestCase):

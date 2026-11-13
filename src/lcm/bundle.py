@@ -90,12 +90,19 @@ def _sha256(path: Path) -> str:
 
 
 def _excluded(relative: str, patterns: list[str]) -> bool:
+    """Match a path and each of its components against the patterns.
+
+    Single-component patterns such as `Cache` apply at any depth, while
+    multi-component patterns such as `.local/share/Steam` must match a path
+    prefix so the directory and all of its descendants are pruned.
+    """
     parts = Path(relative).parts
     for pattern in patterns:
-        if any(fnmatch.fnmatch(part, pattern) for part in parts):
-            return True
-        if fnmatch.fnmatch(relative, pattern):
-            return True
+        prefix = ""
+        for part in parts:
+            prefix = f"{prefix}/{part}" if prefix else part
+            if fnmatch.fnmatch(part, pattern) or fnmatch.fnmatch(prefix, pattern):
+                return True
     return False
 
 
@@ -115,28 +122,29 @@ def _add_member(
     path: Path,
     arcname: str,
     member_filter,
-) -> None:
+) -> bool:
     try:
         info = archive.gettarinfo(str(path), arcname)
     except OSError:
-        return
+        return False
     if info is None:
-        return
+        return False
     if member_filter is not None and member_filter(info) is None:
-        return
+        return False
     if info.isreg():
         try:
             handle = open(path, "rb")
         except OSError:
             # Unreadable file (for example a root-only secret while exporting
             # unprivileged): skip it instead of aborting the whole bundle.
-            return
+            return False
         try:
             archive.addfile(info, handle)
         finally:
             handle.close()
     else:
         archive.addfile(info)
+    return True
 
 
 def _walk_into(
@@ -145,7 +153,8 @@ def _walk_into(
     arcname: str,
     member_filter,
 ) -> None:
-    _add_member(archive, path, arcname, member_filter)
+    if not _add_member(archive, path, arcname, member_filter):
+        return
     if path.is_symlink() or not path.is_dir():
         return
     try:
