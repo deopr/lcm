@@ -107,11 +107,14 @@ def _excluded(relative: str, patterns: list[str]) -> bool:
 
 
 def _make_filter(patterns: list[str]):
+    seen: set[str] = set()
+
     def _filter(member: tarfile.TarInfo) -> tarfile.TarInfo | None:
         if member.isdev() or member.isfifo():
             return None
-        if _excluded(member.name, patterns):
+        if member.name in seen or _excluded(member.name, patterns):
             return None
+        seen.add(member.name)
         return member
 
     return _filter

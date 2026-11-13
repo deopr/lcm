@@ -105,7 +105,7 @@ Safety properties:
 | --- | --- | --- | --- |
 | Dotfiles, shell rc files, `.config`, fonts/icons/themes | kept | included | included |
 | Documents, Pictures, Videos, Music, Projects | kept | not included | included |
-| Other app data such as `.thunderbird`, `.var/app`, `.steam` | kept | not included | included |
+| Other app data such as `.thunderbird`, `.var/app`, `.wine` | kept | not included | included |
 | Caches, Trash, `Downloads`, `Games`, Steam/lutris libraries | kept | excluded | excluded |
 | `.ssh` keys | kept | included | included |
 | `.gnupg` keyring | kept | not included | included |
@@ -118,7 +118,9 @@ Safety properties:
 `--full-home` becomes an allowlist of `.` and skips the usual junk:
 `.cache`, `.local/share/Trash`, `.local/share/Steam`, `.local/share/lutris`,
 `Downloads`, `Games`, `.lcm-backup`, and common browser/Electron cache
-directories. Add specific paths with repeatable `--include-home`:
+directories. Add specific paths with repeatable `--include-home`; an explicit
+include overrides a default exclusion (for example
+`--include-home Downloads/taxes.pdf`):
 
 ```sh
 lcm export ~/lcm-backup.lcmb --include-home Documents --include-home Projects

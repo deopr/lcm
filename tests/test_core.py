@@ -336,6 +336,18 @@ class TestHomeCapture(unittest.TestCase):
                     f"{prefix} leaked into the full-home capture",
                 )
 
+    def test_overlapping_patterns_do_not_duplicate_members(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            home = Path(tmp) / "home"
+            (home / "Documents").mkdir(parents=True)
+            (home / "Documents/note.txt").write_text("note", encoding="utf-8")
+            out = Path(tmp) / "home.tar"
+            bundle._tar_tree(home, [".", "Documents"], DEFAULT_NEVER, out)
+            with tarfile.open(out) as archive:
+                names = [member.name for member in archive.getmembers()]
+            self.assertEqual(len(names), len(set(names)))
+            self.assertIn("Documents/note.txt", names)
+
     def test_never_matches_multi_component_prefix(self):
         self.assertTrue(_never(".local/share/Steam/apps/x", DEFAULT_NEVER))
         self.assertTrue(_never(".local/share/Trash/files/x", DEFAULT_NEVER))
@@ -364,6 +376,20 @@ class TestHomeOptions(unittest.TestCase):
         self.assertEqual(
             profile.config.home, [".config", "Documents", "Projects/notes"]
         )
+
+    def test_include_home_overrides_a_default_exclusion(self):
+        profile = Profile(
+            config=ConfigSpec(home=[], never=["Downloads", ".cache"])
+        )
+        _apply_home_options(
+            profile,
+            argparse.Namespace(
+                full_home=False, include_home=["Downloads/taxes.pdf"]
+            ),
+        )
+        self.assertIn("Downloads/taxes.pdf", profile.config.home)
+        self.assertNotIn("Downloads", profile.config.never)
+        self.assertIn(".cache", profile.config.never)
 
     def test_include_home_rejects_absolute_and_traversal(self):
         profile = Profile(config=ConfigSpec(home=[".config"]))
@@ -495,6 +521,31 @@ class TestRestoreExtraction(unittest.TestCase):
             self.assertFalse((home / ".config/abs").is_symlink())
             self.assertEqual(count, 3)
             self.assertTrue(any("unsafe symlink" in note for note in notes))
+
+    def test_excluded_paths_are_not_extracted(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            tar_path = root / "payload.tar"
+            self._tar(
+                tar_path,
+                [
+                    (".config", "dir", ""),
+                    (".config/conf", "file", "hello=1\n"),
+                    (".cache", "dir", ""),
+                    (".cache/junk", "file", "junk"),
+                    (".local/share/Steam", "dir", ""),
+                    (".local/share/Steam/game", "file", "game"),
+                ],
+            )
+            home = root / "home"
+            home.mkdir()
+            count, _notes = _extract(
+                tar_path, home, root / "backup", DEFAULT_NEVER, apply=True
+            )
+            self.assertTrue((home / ".config/conf").is_file())
+            self.assertFalse((home / ".cache/junk").exists())
+            self.assertFalse((home / ".local/share/Steam/game").exists())
+            self.assertEqual(count, 2)
 
     def test_existing_symlink_ancestor_does_not_escape(self):
         with tempfile.TemporaryDirectory() as tmp:

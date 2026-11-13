@@ -83,12 +83,21 @@ def cmd_plan(args: argparse.Namespace) -> int:
     return 0
 
 
+def _pattern_covers(pattern: str, path: str) -> bool:
+    """True when an exclusion pattern is the path itself or one of its parents."""
+    pattern_parts = Path(pattern).parts
+    path_parts = Path(path).parts
+    return bool(pattern_parts) and path_parts[: len(pattern_parts)] == pattern_parts
+
+
 def _apply_home_options(profile, args: argparse.Namespace) -> None:
     """Expand the profile's home allowlist for a complete user-data move."""
-    if getattr(args, "full_home", False):
+    full_home = getattr(args, "full_home", False)
+    if full_home:
         profile.config.home = ["."]
         profile.config.never = sorted(
-            {*profile_mod.DEFAULT_NEVER, *profile.config.never}
+            {str(item) for item in profile_mod.DEFAULT_NEVER}
+            | {str(item) for item in profile.config.never}
         )
     extras = list(getattr(args, "include_home", None) or [])
     if not extras:
@@ -102,7 +111,15 @@ def _apply_home_options(profile, args: argparse.Namespace) -> None:
                 f"(got {item!r})"
             )
         cleaned.append(str(candidate))
-    profile.config.home = sorted({*profile.config.home, *cleaned})
+    if not full_home:
+        profile.config.home = sorted({*profile.config.home, *cleaned})
+    # An explicit --include-home wins over a default exclusion, so
+    # `--include-home Downloads` can bring back a normally skipped path.
+    profile.config.never = [
+        str(pattern)
+        for pattern in profile.config.never
+        if not any(_pattern_covers(str(pattern), item) for item in cleaned)
+    ]
 
 
 def cmd_export(args: argparse.Namespace) -> int:
