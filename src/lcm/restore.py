@@ -394,7 +394,9 @@ def _restore(
 
     stamp = timestamp()
     if "config" in selected:
-        plan = _home_plan(profile, apply=apply, report=report)
+        # A profile-only restore has no dotfile payload, so there is no reason
+        # to create accounts or touch home directories.
+        plan = _home_plan(profile, apply=apply, report=report) if home_tars else {}
 
         if etc_tar is not None:
             backup = Path("/var/lib/lcm/backup") / stamp / "etc"
