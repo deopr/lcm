@@ -155,7 +155,9 @@ def update_command(family: str) -> list[str] | None:
     if family == "debian":
         return ["apt-get", "update"]
     if family == "arch":
-        return ["pacman", "-Sy", "--noconfirm"]
+        # Arch does not support partial upgrades: sync and upgrade together
+        # before installing anything new.
+        return ["pacman", "-Syu", "--noconfirm"]
     if family == "suse":
         return ["zypper", "--non-interactive", "refresh"]
     return None

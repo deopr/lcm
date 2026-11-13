@@ -12,7 +12,7 @@ from pathlib import Path
 from lcm import bundle, pkgs
 from lcm.cli import _apply_home_options, _looks_like_bundle, build_parser
 from lcm.profile import DEFAULT_NEVER
-from lcm.restore import _extract, _never
+from lcm.restore import _extract, _never, _resolve
 from lcm.assess import analyze, needed_space_bytes
 from lcm.detect import (
     Boot,
@@ -400,6 +400,28 @@ class TestHomeOptions(unittest.TestCase):
                 )
 
 
+class TestRawFallback(unittest.TestCase):
+    def test_unmapped_raw_names_are_only_tried_when_requested(self):
+        profile = Profile(
+            source={"family": "fedora"},
+            packages=PackageSpec(
+                raw=[{"name": "definitely-not-in-the-database", "family": "fedora"}]
+            ),
+        )
+        _native, _flatpak, unknown, attempted = _resolve(
+            profile, "arch", "arch"
+        )
+        self.assertEqual(unknown, ["definitely-not-in-the-database"])
+        self.assertEqual(attempted, [])
+
+        native, _flatpak, unknown, attempted = _resolve(
+            profile, "arch", "arch", try_raw=True
+        )
+        self.assertIn("definitely-not-in-the-database", native)
+        self.assertEqual(unknown, [])
+        self.assertEqual(attempted, ["definitely-not-in-the-database"])
+
+
 class TestCliParsing(unittest.TestCase):
     def test_import_is_an_alias_for_restore(self):
         args = build_parser().parse_args(["import", "bundle.lcmb"])
@@ -420,6 +442,10 @@ class TestCliParsing(unittest.TestCase):
         )
         self.assertTrue(args.full_home)
         self.assertEqual(args.include_home, ["Documents", "Projects"])
+
+    def test_restore_try_raw_flag(self):
+        args = build_parser().parse_args(["restore", "bundle.lcmb", "--try-raw"])
+        self.assertTrue(args.try_raw)
 
 
 class TestRestoreFormatDetection(unittest.TestCase):
@@ -472,6 +498,9 @@ class TestAssessment(unittest.TestCase):
 
 
 class TestPkgs(unittest.TestCase):
+    def test_arch_update_is_a_full_upgrade(self):
+        self.assertEqual(pkgs.update_command("arch"), ["pacman", "-Syu", "--noconfirm"])
+
     def test_clean_dedupes_and_sorts(self):
         self.assertEqual(
             pkgs._clean([" git ", "git", "", "# comment", "curl"]),

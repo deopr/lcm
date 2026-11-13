@@ -39,6 +39,7 @@ class RestoreReport:
     native: list[str] = field(default_factory=list)
     flatpak: list[str] = field(default_factory=list)
     unknown: list[str] = field(default_factory=list)
+    raw_attempts: list[str] = field(default_factory=list)
     failed: list[str] = field(default_factory=list)
     skipped: list[str] = field(default_factory=list)
     created_users: list[str] = field(default_factory=list)
@@ -206,12 +207,13 @@ def _extract(
 
 
 def _resolve(
-    profile: Profile, family: str, distro_id: str
-) -> tuple[list[str], list[str], list[str]]:
+    profile: Profile, family: str, distro_id: str, *, try_raw: bool = False
+) -> tuple[list[str], list[str], list[str], list[str]]:
     database = Database()
     native: list[str] = []
     flatpak: list[str] = []
     unknown: list[str] = []
+    attempted: list[str] = []
     excluded = {str(item) for item in profile.packages.exclude}
 
     for canonical in profile.packages.native:
@@ -241,11 +243,22 @@ def _resolve(
             native.append(resolution.native)
         elif resolution.flatpak:
             flatpak.append(resolution.flatpak)
+        elif try_raw:
+            # Opt-in best effort: the target may use the same name even when
+            # there is no canonical mapping.  Missing names are reported by
+            # the package installer, never guessed silently.
+            native.append(name)
+            attempted.append(name)
         else:
             unknown.append(name)
 
     flatpak.extend(profile.packages.flatpak)
-    return sorted(set(native)), sorted(set(flatpak)), sorted(set(unknown))
+    return (
+        sorted(set(native)),
+        sorted(set(flatpak)),
+        sorted(set(unknown)),
+        sorted(set(attempted)),
+    )
 
 
 def _human_users() -> list[pwd.struct_passwd]:
@@ -367,6 +380,7 @@ def _restore(
     etc_tar: Path | None = None,
     home_tars: dict[str, Path] | None = None,
     include_flatpak: bool = True,
+    try_raw: bool = False,
 ) -> RestoreReport:
     selected = _parse_steps(steps)
     distro = detect_distro()
@@ -384,7 +398,9 @@ def _restore(
             raise LcmError("aborted")
 
     if "packages" in selected:
-        native, flatpak, unknown = _resolve(profile, family, distro.id)
+        native, flatpak, unknown, attempted = _resolve(
+            profile, family, distro.id, try_raw=try_raw
+        )
         if not include_flatpak and flatpak:
             report.notes.append(
                 f"{len(flatpak)} Flatpak app(s) skipped (--no-flatpak)"
@@ -393,6 +409,14 @@ def _restore(
         report.native = native
         report.flatpak = flatpak
         report.unknown = unknown
+        report.raw_attempts = attempted
+        if attempted:
+            verb = "attempted" if apply else "would be attempted"
+            report.notes.append(
+                f"{len(attempted)} unmapped raw package name(s) {verb} "
+                "unchanged (--try-raw); names missing from the target are "
+                "reported as failures"
+            )
         if apply:
             report.failed.extend(pkgs.install(family, native))
             if flatpak and not pkgs.is_installed(family, "flatpak"):
@@ -479,6 +503,7 @@ def run(
     steps: str | None = None,
     assume_yes: bool = False,
     include_flatpak: bool = True,
+    try_raw: bool = False,
 ) -> RestoreReport:
     home_tars: dict[str, Path] = {}
     for user in bundle.profile.users:
@@ -494,6 +519,7 @@ def run(
         etc_tar=bundle.payload_etc,
         home_tars=home_tars,
         include_flatpak=include_flatpak,
+        try_raw=try_raw,
     )
 
 
@@ -504,6 +530,7 @@ def run_profile(
     steps: str | None = None,
     assume_yes: bool = False,
     include_flatpak: bool = True,
+    try_raw: bool = False,
 ) -> RestoreReport:
     """Apply a bare `.lcm.yaml` (packages and services, no file payload)."""
     return _restore(
@@ -515,6 +542,7 @@ def run_profile(
         etc_tar=None,
         home_tars={},
         include_flatpak=include_flatpak,
+        try_raw=try_raw,
     )
 
 

@@ -167,7 +167,14 @@ sudo lcm restore ~/lcm-backup.lcmb --apply --yes # do it
 sudo lcm restore ~/lcm-backup.lcmb --apply --step packages
 sudo lcm restore my.lcm.yaml --apply             # profile only, no file payload
 sudo lcm import  ~/lcm-backup.lcmb --apply --yes # same as restore
+sudo lcm import  ~/lcm-backup.lcmb --apply --yes --try-raw
 ```
+
+`--try-raw` is an opt-in best effort for packages that had no canonical
+mapping: it tries the source package name unchanged on the target. This helps
+when both distros use the same name; names the target does not carry are
+reported as failures. It is off by default because it is not a verified
+cross-family mapping.
 
 - packages are attempted as a batch, then one by one; missing names are
   reported instead of aborting the restore,
@@ -253,6 +260,24 @@ reported as *unmapped*; that is expected. The canonical package set (the
 `native:` list) is installed, and Flatpak apps are installed too. To get a
 higher hit rate, export with `--target debian` and inspect `lcm restore`'s dry
 run before applying.
+
+### Testing on a fresh Arch VM
+
+```sh
+# inside the VM, as the normal user with sudo (not as root)
+sudo pacman -Syu --needed git python python-yaml
+# copy this checkout and the bundle into the VM, then:
+cd lcm && sudo ./install.sh
+
+sudo lcm restore /path/to/lcm-backup.lcmb              # dry run
+sudo lcm restore /path/to/lcm-backup.lcmb --apply --yes --try-raw
+```
+
+Run `lcm` through `sudo` from the account that should receive the dotfiles. A
+single human account is mapped automatically; running as root with no normal
+account makes LCM create the bundle's user instead. `--try-raw` is worth using
+for a Fedora-to-Arch test because it attempts source names that have no
+canonical mapping, then reports the ones Arch does not carry.
 
 Use `--strict` only when you want CI to fail on any missing package name; a
 cross-distro bundle normally contains a few names the target calls differently.

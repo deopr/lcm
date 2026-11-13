@@ -185,6 +185,7 @@ def cmd_restore(args: argparse.Namespace) -> int:
             steps=args.step,
             assume_yes=args.yes,
             include_flatpak=not args.no_flatpak,
+            try_raw=args.try_raw,
         )
         if getattr(args, "json", False):
             payload = dict(report.__dict__)
@@ -204,6 +205,7 @@ def cmd_restore(args: argparse.Namespace) -> int:
             steps=args.step,
             assume_yes=args.yes,
             include_flatpak=not args.no_flatpak,
+            try_raw=args.try_raw,
         )
         if getattr(args, "json", False):
             payload = dict(report.__dict__)
@@ -388,6 +390,11 @@ def build_parser() -> argparse.ArgumentParser:
     restore_cmd.add_argument("--step", help="packages,config,services")
     restore_cmd.add_argument(
         "--no-flatpak", action="store_true", help="skip Flatpak applications"
+    )
+    restore_cmd.add_argument(
+        "--try-raw",
+        action="store_true",
+        help="also try unmapped source package names unchanged (best effort)",
     )
     restore_cmd.add_argument(
         "--strict", action="store_true", help="exit 1 if any package failed"
