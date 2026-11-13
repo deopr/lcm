@@ -211,9 +211,9 @@ Use `--strict` only when you want CI to fail on any missing package name; a
 cross-distro bundle normally contains a few names the target calls differently.
 This path was exercised on clean Debian 13 and Debian 12 containers. Debian 13
 installed the full example set; Debian 12 installed all but three newer tools
-(`eza`, `fastfetch`, `starship`) and reported them without aborting. User-home
-mapping and dotfile restore, including relative symlinks and skipped absolute
-symlinks, completed in both.
+(`eza`, `fastfetch`, `starship`) and reported them without aborting. A bundle
+restore on Debian 13 also exercised user-home mapping and dotfiles, including
+kept relative symlinks and skipped absolute symlinks.
 
 ## Safety invariants
 
