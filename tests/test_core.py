@@ -191,6 +191,18 @@ class TestOldBootEntry(unittest.TestCase):
         boot = self._boot([self._entry("0001", "Fedora Linux")])
         self.assertIsNone(_old_boot_entry(boot, "0001", "Fedora Linux"))
 
+    def test_live_usb_boot_current_is_not_the_old_system(self):
+        usb = BootEntry(
+            number="0001",
+            label="UEFI: SanDisk",
+            active=True,
+            loader="HD(1,GPT,abc)/File(\\EFI\\BOOT\\BOOTX64.EFI)",
+            order=0,
+        )
+        fedora = self._entry("0002", "Fedora Linux")
+        boot = self._boot([usb, fedora], current="0001")
+        self.assertEqual(_old_boot_entry(boot, "0009", "Fedora Linux"), "0002")
+
 
 class TestPickKernel(unittest.TestCase):
     def _touch(self, path, mtime):

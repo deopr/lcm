@@ -22,7 +22,7 @@ from lcm import __version__, pkgs
 from lcm.assess import analyze, needed_space_bytes, render_plan
 from lcm.bundle import create as create_bundle
 from lcm.bundle import suggested_name
-from lcm.detect import Boot, SystemInfo, detect_system, family_of
+from lcm.detect import Boot, BootEntry, SystemInfo, detect_system, family_of
 from lcm.mapping import Database
 from lcm.profile import Profile
 from lcm.util import (
@@ -1408,6 +1408,16 @@ def _add_boot_entry(ctx: InstallContext) -> str:
     return number
 
 
+def _removable_entry(entry: BootEntry) -> bool:
+    """True for firmware entries that boot removable media or a live image."""
+    label = entry.label.strip().lower()
+    loader = entry.loader.strip().lower().replace("/", "\\")
+    return (
+        label.startswith(("uefi:", "usb", "cd-rom", "cdrom"))
+        or "\\efi\\boot\\boot" in loader
+    )
+
+
 def _old_boot_entry(
     boot: Boot, new_entry: str | None, source_name: str = ""
 ) -> str | None:
@@ -1415,15 +1425,19 @@ def _old_boot_entry(
 
     Label matching can select a sibling entry with a similar name.  BootCurrent
     identifies the entry that launched the running system, which is exactly the
-    one commit should eventually remove.  When the firmware does not report
-    BootCurrent, fall back to the running distribution's name, not to whichever
-    entry happens to be first in BootOrder.
+    one commit should eventually remove.  A live USB also reports BootCurrent,
+    so removable entries are ignored.  When BootCurrent is unavailable, fall
+    back to the running distribution's name, not to whichever entry happens to
+    be first in BootOrder.
     """
     current = boot.boot_current
+    current_entry = next(
+        (entry for entry in boot.entries if entry.number == current), None
+    )
     if (
-        current
+        current_entry is not None
         and current != new_entry
-        and any(entry.number == current for entry in boot.entries)
+        and not _removable_entry(current_entry)
     ):
         return current
 
@@ -1433,7 +1447,7 @@ def _old_boot_entry(
         if needle and needle not in needles:
             needles.append(needle)
     for entry in boot.entries:
-        if entry.number == new_entry:
+        if entry.number == new_entry or _removable_entry(entry):
             continue
         if any(needle in entry.label.lower() for needle in needles):
             return entry.number
