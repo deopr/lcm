@@ -1,24 +1,24 @@
 # LCM — Linux Continuity Manager
 
-Transactional distro replacement with a rollback button.
+Carry a Linux setup between distributions.
 
-LCM treats a distro hop as a transaction:
+LCM treats a distro migration as a transaction:
 
-1. describe the machine you want as **data** (`.lcm.yaml`),
-2. snapshot the machine you have (`.lcmb`),
+1. describe the desired target as **data** (`.lcm.yaml`),
+2. snapshot the source machine (`.lcmb`),
 3. build the new distro in a **separate btrfs subvolume**,
 4. boot it through its **own firmware entry**,
-5. `commit` only after the new system validates; until then the old system is
-   untouched and one boot-order change brings it back.
+5. `commit` only after the new system validates; until then the old system
+   remains untouched and one boot-order change restores it.
 
 `/home` is never recreated. The ESP is never reformatted. Nothing is deleted
 before `commit`.
 
 > **Status: early alpha.** The `export` → `restore` path is implemented and
 > has been exercised on real Arch and Debian VMs. `replace` is implemented but
-> has **not yet been boot-tested on real UEFI + btrfs hardware**. Do not use
-> `replace` as your only migration path. Keep the old system bootable and a
-> separate backup until that test passes.
+> has **not yet been boot-tested on real UEFI + btrfs hardware**. It should not
+> be used as the only migration path. Keep the source system bootable and
+> retain an independent backup until that test passes.
 
 ## Support matrix
 
@@ -32,24 +32,25 @@ before `commit`.
 \* Implemented, but not yet boot-tested on real UEFI + btrfs hardware. Treat
 it as a development feature.
 
-- **systemd only.** dinit, runit, OpenRC and friends are out of scope.
-- `replace` requires: btrfs root, UEFI, an ESP at `/boot/efi` or `/efi`, and a
+- **systemd only.** dinit, runit, OpenRC and similar init systems are out of
+  scope.
+- `replace` requires a btrfs root, UEFI, an ESP at `/boot/efi` or `/efi`, and a
   separate `/home` (its own subvolume or filesystem). It refuses rather than
   risk user data.
-- `restore` works on ext4, LVM, anything — it only installs packages and writes
-  inside `/home` and an explicit `/etc` allowlist.
+- `restore` is filesystem-agnostic: it installs packages and writes only inside
+  `/home` and an explicit `/etc` allowlist.
 
 ## Install
 
-From a source checkout, on Debian, Fedora or Arch:
+From a source checkout on Debian, Fedora, or Arch:
 
 ```sh
 sudo ./install.sh
 lcm --version
 ```
 
-`install.sh` installs the distro's PyYAML package if needed and puts a launcher
-in `/usr/local/bin/lcm`.
+`install.sh` installs the distro's PyYAML package if needed and places a
+launcher in `/usr/local/bin/lcm`.
 
 For development without installing:
 
@@ -63,9 +64,9 @@ PYTHONPATH=src python3 -m unittest discover -s tests -v
 ### `.lcm.yaml` — the profile
 
 A human-editable, distro-neutral description of desired state. It contains
-packages as canonical ids (`firefox`, not `firefox-esr`), users, services and
-the config paths worth carrying. **It contains no executable code** — no hooks,
-no scripts, no shell snippets.
+packages as canonical ids (`firefox`, not `firefox-esr`), users, services, and
+the configuration paths to carry. **It contains no executable code** — no
+hooks, no scripts, no shell snippets.
 
 ```yaml
 lcm: 1
@@ -91,24 +92,24 @@ to `.lcm`; it detects the format by content.
 
 Safety properties:
 
-- bundles are written mode `0600` (they can contain SSH keys),
-- extraction refuses absolute paths, `..`, device nodes, FIFOs and top-level
+- bundles are written with mode `0600` (they can contain SSH keys),
+- extraction refuses absolute paths, `..`, device nodes, FIFOs, and top-level
   links; absolute symlinks inside a payload are skipped with a note,
 - every file is checksummed and verified before use,
 - unreadable source files are skipped rather than aborting the export,
-- `--full-home` can include browser profiles, SSH/GPG keys and other
+- `--full-home` can include browser profiles, SSH/GPG keys, and other
   credentials; treat the bundle like a password vault.
 
-## What survives the hop
+## Migration coverage
 
-`replace` and `restore` solve different halves of the move:
+`replace` and `restore` cover different migration paths:
 
 - **`replace` on the same machine** builds a new distro next to the old one and
-  **reuses `/home` completely**. Every personal file stays because it is never
+  **reuses `/home` completely**. User files remain because `/home` is never
   copied or recreated. The old root remains bootable until `commit`.
-- **`export` → `restore` on another machine or after a wipe** carries what the
-  profile lists. The default is dotfiles and application config; add
-  `--full-home` when you want personal files too.
+- **`export` → `restore` on another machine or after a wipe** carries only the
+  content listed in the profile. The default covers dotfiles and application
+  configuration; `--full-home` adds user files.
 
 | What | `replace` (same machine) | `export` → `restore` (default) | `export --full-home` → `restore` |
 | --- | --- | --- | --- |
@@ -124,11 +125,11 @@ Safety properties:
 | `/var/lib`, databases, Docker images, VMs | untouched on the old root | not included | not included |
 | Users and passwords | users recreated with the same UID and password hash | mapped onto the existing human account when possible; a missing account may be created without the old password | same |
 
-`--full-home` becomes an allowlist of `.` and skips the usual junk:
+`--full-home` becomes an allowlist of `.` and skips common junk directories:
 `.cache`, `.local/share/Trash`, `.local/share/Steam`, `.local/share/lutris`,
 `Downloads`, `Games`, `.lcm-backup`, and common browser/Electron cache
 directories. Add specific paths with repeatable `--include-home`; an explicit
-include overrides a default exclusion (for example
+include overrides a default exclusion (for example,
 `--include-home Downloads/taxes.pdf`):
 
 ```sh
@@ -137,12 +138,13 @@ lcm export --full-home -o /mnt/storage/lcm-full.lcmb
 ```
 
 `-o`/`--output` accepts a `.lcmb` file or an existing directory. The older
-positional form (`lcm export ~/lcm-backup.lcmb`) still works. If you omit the
-destination, LCM writes `<profile>-<timestamp>.lcmb` in the current directory.
+positional form (`lcm export ~/lcm-backup.lcmb`) remains supported. When the
+destination is omitted, LCM writes `<profile>-<timestamp>.lcmb` in the current
+directory.
 
-Staging space for the payload tars defaults to the output's filesystem, not
-`/tmp`, so a full-home export goes to the disk or NAS you chose. If the output
-is on a NAS, keep the scratch space local:
+Staging space for the payload tars defaults to the output filesystem, not
+`/tmp`, so a full-home export uses the selected disk or NAS. If the output is
+on a NAS, keep the scratch space local:
 
 ```sh
 lcm export --full-home -o /mnt/nas/backups/lcm-full.lcmb --staging-dir /mnt/storage
@@ -150,7 +152,7 @@ lcm export --full-home -o /mnt/nas/backups/lcm-full.lcmb --staging-dir /mnt/stor
 
 The staged payload and the compressed bundle both exist at the same time, so
 budget roughly twice the selected home data and check `df -h` first. Existing
-bundles are not overwritten unless you pass `--force`.
+bundles are not overwritten without `--force`.
 
 A large export is not one silent block. LCM reports each phase separately:
 capture, checksum verification and compression. Every line shows the bytes
@@ -158,12 +160,12 @@ completed, elapsed time and an estimated time left, and the final output lists
 the exact duration of each phase:
 
 ```text
-  capture home:deopr: 51% | 42.7 GiB / 83.1 GiB | 48,231 / 100,454 files | elapsed 18m 04s | ~17m 12s left
+  capture home:alice: 51% | 42.7 GiB / 83.1 GiB | 48,231 / 100,454 files | elapsed 18m 04s | ~17m 12s left
   verify checksums: 26% | 22.9 GiB / 88.8 GiB | 12 / 20 files | elapsed 4m 12s | ~12m 32s left
   compress bundle: 37% | 33.1 GiB / 88.8 GiB | 9 / 20 files | 12.3 GiB written | elapsed 18m 20s | ~30m 33s left
 
 Phase timings:
-  capture home:deopr  18m 42s
+  capture home:alice  18m 42s
   capture etc          0.1s
   verify checksums     2m 12s
   compress bundle     21m 08s
@@ -176,18 +178,18 @@ and the ETA rather than the CPU percentage. Progress goes to stderr, so
 `--json` output on stdout stays valid.
 
 A bundle is a continuity snapshot, not a disk image. It does not clone
-`/var/lib`, package versions, third-party repositories, container images or
-non-allowlisted `/etc` state. Treat it as "my setup and my files", not "the
-whole disk".
+`/var/lib`, package versions, third-party repositories, container images, or
+non-allowlisted `/etc` state. Treat it as a setup-and-files snapshot, not a
+full disk image.
 
 ## Commands
 
 ### Read-only first
 
 ```sh
-lcm check --target pikaos                  # verdict: green / yellow / red
-lcm plan  --target pikaos                  # the exact steps that would run
-lcm check --target arch --profile my.lcm.yaml
+lcm check --target debian                  # verdict: green / yellow / red
+lcm plan  --target debian                  # the exact steps that would run
+lcm check --target arch --profile workstation.lcm.yaml
 lcm mapping firefox --to debian            # package resolution
 lcm mapping firefox-esr --from debian --to arch
 ```
@@ -195,7 +197,7 @@ lcm mapping firefox-esr --from debian --to arch
 `check` and `plan` never write anything. `check` exits 0 even for a red
 verdict; read the verdict line.
 
-### Capture this machine
+### Capture a machine
 
 ```sh
 lcm export -o ~/lcm-backup.lcmb               # packages + dotfiles/config allowlist
@@ -220,15 +222,15 @@ exist during the export; allow roughly twice the selected data.
 Run `lcm` with no arguments for a short command overview, or
 `lcm export --help` / `lcm restore --help` for examples.
 
-### Apply a bundle to the machine you are on
+### Apply a bundle to the current machine
 
-This is the safe half, and the one to use on a fresh VM:
+This is the safer path and the recommended one for a fresh VM:
 
 ```sh
 lcm restore ~/lcm-backup.lcmb                    # dry run
-sudo lcm restore ~/lcm-backup.lcmb --apply --yes # do it
+sudo lcm restore ~/lcm-backup.lcmb --apply --yes # apply changes
 sudo lcm restore ~/lcm-backup.lcmb --apply --step packages
-sudo lcm restore my.lcm.yaml --apply             # profile only, no file payload
+sudo lcm restore workstation.lcm.yaml --apply    # profile only, no file payload
 sudo lcm import  ~/lcm-backup.lcmb --apply --yes # same as restore
 sudo lcm import  ~/lcm-backup.lcmb --apply --yes --try-raw
 ```
@@ -253,8 +255,10 @@ cross-family mapping.
 > it in a VM or on a snapshot first, and keep the old system bootable.
 
 ```sh
-sudo lcm replace --target debian                  # dry run happens first
-sudo lcm replace --target arch --profile my.lcm.yaml
+sudo lcm replace --target debian --suite trixie   # dry run happens first
+sudo lcm replace --target arch --profile workstation.lcm.yaml
+
+# derivative example: add a third-party repository and meta package
 sudo lcm replace --target pikaos --suite sid \
      --repo 'deb http://repo.pika-os.com/ pikaos main' \
      --repo-key https://repo.pika-os.com/pikaos.gpg \
@@ -299,24 +303,24 @@ to the ESP so it survives a broken root.
 
 ## Testing on a fresh Debian VM
 
-This is the acceptance path: install the bundle on a Debian VM that has nothing
-on it. `lcm check` assesses the **replace** path and will report RED on an ext4
-VM because replace needs btrfs; that is expected. Use the `restore` dry run
-below as the check for this path.
+The acceptance path for `export` → `restore` is a Debian VM with no prior
+configuration. `lcm check` assesses the **replace** path and reports RED on an
+ext4 VM because `replace` requires btrfs; that result is expected. Use the
+`restore` dry run below to validate this path.
 
 ```sh
-# inside the VM, as the user with sudo
+# inside the VM, as a user with sudo
 sudo apt-get update
-sudo apt-get install -y git python3 python3-yaml    # or: sudo ./install.sh
+sudo apt-get install -y git python3 python3-yaml
 
-git clone <this-repo> lcm && cd lcm
+git clone https://github.com/deopr/lcm.git && cd lcm
 sudo ./install.sh
 
-# copy the bundle into the VM (scp, shared folder, whatever)
+# transfer the bundle into the VM (scp, shared folder, or similar)
 sudo lcm restore /path/to/lcm-backup.lcmb           # dry run, inspect output
 sudo lcm restore /path/to/lcm-backup.lcmb --apply --yes --no-flatpak
 
-# or install a plain profile instead of a bundle
+# or apply a plain profile instead of a bundle
 sudo lcm restore /path/to/workstation.lcm.yaml --apply --yes --no-flatpak
 
 # success checks
@@ -324,19 +328,20 @@ dpkg -l | grep -E 'firefox|git|neovim'
 ls -la ~/.config ~/.ssh
 ```
 
-If the bundle was produced on Fedora, most raw Fedora-only names will be
-reported as *unmapped*; that is expected. The canonical package set (the
-`native:` list) is installed, and Flatpak apps are installed too. To get a
-higher hit rate, export with `--target debian` and inspect `lcm restore`'s dry
-run before applying.
+If the bundle was produced on Fedora, most raw Fedora-only names are reported
+as *unmapped*; that result is expected. The canonical package set (the
+`native:` list) is installed, and Flatpak apps are installed as well. A higher
+hit rate is possible by exporting with `--target debian` and inspecting the
+`lcm restore` dry run before applying.
 
 ### Testing on a fresh Arch VM
 
 ```sh
-# inside the VM, as the normal user with sudo (not as root)
+# inside the VM, as a normal user with sudo (not as root)
 sudo pacman -Syu --needed git python python-yaml
-# copy this checkout and the bundle into the VM, then:
-cd lcm && sudo ./install.sh
+
+git clone https://github.com/deopr/lcm.git && cd lcm
+sudo ./install.sh
 
 sudo lcm restore /path/to/lcm-backup.lcmb              # dry run
 sudo lcm restore /path/to/lcm-backup.lcmb --apply --yes --try-raw
@@ -344,13 +349,13 @@ sudo lcm restore /path/to/lcm-backup.lcmb --apply --yes --try-raw
 
 Run `lcm` through `sudo` from the account that should receive the dotfiles. A
 single human account is mapped automatically; running as root with no normal
-account makes LCM create the bundle's user instead. `--try-raw` is worth using
+account causes LCM to create the bundle's user instead. `--try-raw` is useful
 for a Fedora-to-Arch test because it attempts source names that have no
-canonical mapping, then reports the ones Arch does not carry.
+canonical mapping and reports the ones Arch does not carry.
 
-Use `--strict` only when you want CI to fail on any missing package name; a
-cross-distro bundle normally contains a few names the target calls differently.
-This path was exercised on clean Debian 13 and Debian 12 containers. Debian 13
+`--strict` makes CI fail on any missing package name; a cross-distro bundle
+normally contains a few names the target calls differently. The `restore` path
+has been exercised on clean Debian 13 and Debian 12 containers. Debian 13
 installed the full example set; Debian 12 installed all but three newer tools
 (`eza`, `fastfetch`, `starship`) and reported them without aborting. Bundle
 restores on both releases exercised user-home mapping and dotfiles, including
@@ -389,16 +394,31 @@ tarfile API on Debian 12).
 ## Package mappings
 
 Canonical ids live in `src/lcm/data/mappings.yaml`. Add an entry when a package
-you use is reported as unmatched:
+is reported as unmatched:
 
 ```yaml
 packages:
-  myapp: {fedora: myapp, debian: myapp, arch: myapp, flatpak: org.example.MyApp}
+  example-app: {fedora: example-app, debian: example-app, arch: example-app, flatpak: org.example.ExampleApp}
 ```
 
-The mapping is intentionally honest: HTTPS-first, no silent name guessing
-across families. Unmatched names are preserved as raw entries in the bundle so
-nothing is lost.
+The mapping is deliberately conservative: HTTPS-first, with no silent name
+guessing across families. Unmatched names are preserved as raw entries in the
+bundle so nothing is lost.
+
+## Contributing
+
+The public repository is <https://github.com/deopr/lcm>. Bug reports and
+package-mapping additions are welcome:
+
+- open an issue at <https://github.com/deopr/lcm/issues> with the source
+  distro, the target distro, and the exact command;
+- include the dry-run output, the package names reported as unmapped, and
+  whether the failure came from `export`, `restore`, or `replace`;
+- for mapping fixes, add the canonical id to `src/lcm/data/mappings.yaml` and
+  run `PYTHONPATH=src python3 -m unittest discover -s tests`.
+
+`replace` is experimental, so reports from real UEFI + btrfs hardware are
+especially useful.
 
 ## License
 
