@@ -14,14 +14,23 @@ LCM treats a distro hop as a transaction:
 `/home` is never recreated. The ESP is never reformatted. Nothing is deleted
 before `commit`.
 
+> **Status: early alpha.** The `export` → `restore` path is implemented and
+> has been exercised on real Arch and Debian VMs. `replace` is implemented but
+> has **not yet been boot-tested on real UEFI + btrfs hardware**. Do not use
+> `replace` as your only migration path. Keep the old system bootable and a
+> separate backup until that test passes.
+
 ## Support matrix
 
 | Target | Install into a subvolume (`replace`) | Apply a bundle (`restore`) |
 | --- | --- | --- |
-| Fedora / RHEL family | yes | yes |
-| Debian / Ubuntu / PikaOS | yes | yes |
-| Arch / Manjaro / CachyOS | yes | yes |
+| Fedora / RHEL family | experimental* | yes |
+| Debian / Ubuntu / PikaOS | experimental* | yes |
+| Arch / Manjaro / CachyOS | experimental* | yes |
 | openSUSE | experimental | yes |
+
+\* Implemented, but not yet boot-tested on real UEFI + btrfs hardware. Treat
+it as a development feature.
 
 - **systemd only.** dinit, runit, OpenRC and friends are out of scope.
 - `replace` requires: btrfs root, UEFI, an ESP at `/boot/efi` or `/efi`, and a
@@ -238,7 +247,10 @@ cross-family mapping.
 - overwritten files are backed up under `/var/lib/lcm/backup/<timestamp>` or
   `~/.lcm-backup/<timestamp>`.
 
-### Replace a distro (btrfs + UEFI)
+### Replace a distro (btrfs + UEFI, experimental)
+
+> This path has not yet been boot-tested on real UEFI + btrfs hardware. Test
+> it in a VM or on a snapshot first, and keep the old system bootable.
 
 ```sh
 sudo lcm replace --target debian                  # dry run happens first
