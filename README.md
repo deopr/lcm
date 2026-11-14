@@ -210,12 +210,15 @@ What happens:
 6. fstab, users (same UID and password hash), packages, initramfs and a
    **unified kernel image** are created,
 7. a separate firmware entry `LCM <target>` is registered; the old entry stays
-   the default.
+   first in BootOrder, and a one-shot `BootNext` makes the firmware try the new
+   entry exactly once, falling back to the old system if it fails,
+8. Fedora targets get `/.autorelabel` so SELinux relabels the new root on first
+   boot (this may reboot once).
 
 Then:
 
 ```sh
-# reboot, pick "LCM <target>" in the firmware menu (usually F12)
+# reboot; BootNext tries "LCM <target>" once, or pick it with F12
 sudo lcm validate                 # runs the same checks as first boot
 sudo lcm commit                   # deletes the old subvolume + old boot entry
 sudo lcm commit --keep-old        # or keep it around
@@ -292,7 +295,8 @@ tarfile API on Debian 12).
 
 - `check`, `plan`, `mapping`, `journal list` never write.
 - `replace` never modifies the running root; it snapshots it read-only first.
-- The old firmware entry remains first until `commit`.
+- The old firmware entry remains first in `BootOrder` until `commit`; the new
+  entry is tried once through `BootNext`.
 - `commit` deletes only after validation (`--force` exists, but says why).
 - `/home` is reused and only written additively, with per-file backups.
 - Partition table and `efibootmgr` output are recorded in the journal.

@@ -22,7 +22,7 @@ from lcm import __version__, pkgs
 from lcm.assess import analyze, needed_space_bytes, render_plan
 from lcm.bundle import create as create_bundle
 from lcm.bundle import suggested_name
-from lcm.detect import SystemInfo, detect_system, family_of
+from lcm.detect import Boot, SystemInfo, detect_system, family_of
 from lcm.mapping import Database
 from lcm.profile import Profile
 from lcm.util import (
@@ -308,6 +308,7 @@ class InstallContext:
     mounted: list[Path] = field(default_factory=list)
     new_entry: str | None = None
     old_entry: str | None = None
+    boot_next: bool = False
 
 
 # --------------------------------------------------------------------------
@@ -804,6 +805,26 @@ def _write_base_files(ctx: InstallContext) -> None:
             pass
 
 
+def _write_selinux_relabel(ctx: InstallContext) -> None:
+    """Mark a Fedora target for a first-boot SELinux relabel.
+
+    Roots assembled with dnf --installroot commonly have unlabeled files.
+    Booting enforcing with those labels can break login and services, so the
+    target's own autorelabel service must run once before validation.
+    """
+    if ctx.target_family != "fedora":
+        return
+    marker = ctx.target_root / ".autorelabel"
+    if ctx.runner.dry_run:
+        print("    (dry-run) mark the target for an SELinux relabel (/.autorelabel)")
+        return
+    atomic_write(marker, "", mode=0o600)
+    ctx.journal.record("selinux", autorelabel=True)
+    print(
+        "    SELinux: wrote /.autorelabel; the first boot relabels and may reboot once"
+    )
+
+
 def _add_repo(ctx: InstallContext) -> None:
     """Add a target overlay repository (Debian family) before installing."""
     if not ctx.repo:
@@ -1049,27 +1070,53 @@ def _rebuild_initramfs(ctx: InstallContext) -> None:
         ctx.runner.run(["chroot", str(ctx.target_root), "dracut", "-f"], capture=False)
 
 
+def _initrd_names(kernel_name: str) -> list[str]:
+    # `vmlinuz` plus a suffix: "" (generic), "-6.2.0" (Fedora), or "-linux"
+    # (Arch).  Derive the initramfs name from the exact kernel name so a stale
+    # initramfs for another version can never be paired with it.
+    suffix = kernel_name[len("vmlinuz") :]
+    names: list[str] = []
+    if suffix:
+        names.extend(
+            [
+                f"initrd.img{suffix}",
+                f"initramfs{suffix}.img",
+                f"initrd{suffix}",
+            ]
+        )
+    names.extend(["initramfs.img", "initrd.img", "initrd"])
+    return names
+
+
 def _pick_kernel(root: Path) -> tuple[Path, Path]:
+    """Pick the newest real kernel and the initramfs for that exact version.
+
+    Selecting the kernel and initramfs independently by mtime can pair two
+    different releases.  Fedora's rescue kernel is also newer by mtime after
+    installation, so it must never be chosen as the boot kernel.
+    """
     boot = root / "boot"
     kernels = [
         path
-        for pattern in ("vmlinuz-*", "vmlinuz")
-        for path in boot.glob(pattern)
+        for path in boot.glob("vmlinuz*")
         if path.is_file()
-    ]
-    initrds = [
-        path
-        for pattern in ("initrd.img-*", "initramfs-*.img", "initrd-*")
-        for path in boot.glob(pattern)
-        if path.is_file()
+        and "rescue" not in path.name.lower()
+        and not path.name.endswith((".old", ".new", ".bak"))
     ]
     if not kernels:
         raise LcmError("no kernel found in target /boot")
-    if not initrds:
-        raise LcmError("no initramfs found in target /boot")
-    kernels.sort(key=lambda path: path.stat().st_mtime, reverse=True)
-    initrds.sort(key=lambda path: path.stat().st_mtime, reverse=True)
-    return kernels[0], initrds[0]
+    kernels.sort(
+        key=lambda path: (path.stat().st_mtime, path.name), reverse=True
+    )
+    for kernel in kernels:
+        for name in _initrd_names(kernel.name):
+            initrd = boot / name
+            if initrd.is_file():
+                return kernel, initrd
+    raise LcmError(
+        "no initramfs matching the newest kernel found in target /boot: "
+        + ", ".join(path.name for path in kernels)
+    )
 
 
 def _kernel_cmdline(ctx: InstallContext) -> str:
@@ -1210,6 +1257,7 @@ def configure(ctx: InstallContext) -> None:
             "skipped: " + ", ".join(failed)
         )
 
+    _write_selinux_relabel(ctx)
     _prepare_boot_hooks(ctx)
     _ensure_ukify(ctx)
     _rebuild_initramfs(ctx)
@@ -1360,17 +1408,64 @@ def _add_boot_entry(ctx: InstallContext) -> str:
     return number
 
 
+def _old_boot_entry(
+    boot: Boot, new_entry: str | None, source_name: str = ""
+) -> str | None:
+    """Prefer the entry the firmware says it actually booted.
+
+    Label matching can select a sibling entry with a similar name.  BootCurrent
+    identifies the entry that launched the running system, which is exactly the
+    one commit should eventually remove.  When the firmware does not report
+    BootCurrent, fall back to the running distribution's name, not to whichever
+    entry happens to be first in BootOrder.
+    """
+    current = boot.boot_current
+    if (
+        current
+        and current != new_entry
+        and any(entry.number == current for entry in boot.entries)
+    ):
+        return current
+
+    needles: list[str] = []
+    for word in [source_name, *source_name.split()]:
+        needle = word.strip().lower()
+        if needle and needle not in needles:
+            needles.append(needle)
+    for entry in boot.entries:
+        if entry.number == new_entry:
+            continue
+        if any(needle in entry.label.lower() for needle in needles):
+            return entry.number
+    return None
+
+
+def _set_boot_next(ctx: InstallContext, number: str) -> None:
+    """Try the new entry once, falling back to the saved BootOrder on failure."""
+    if ctx.runner.dry_run:
+        print(f"    $ efibootmgr -n {number}")
+        ctx.boot_next = True
+        return
+    ok, _, err = ctx.runner.ok(["efibootmgr", "-n", number])
+    if ok:
+        ctx.boot_next = True
+        ctx.journal.record("boot_next", entry=number)
+    else:
+        print(
+            "warning: could not set BootNext; pick the LCM entry in the firmware "
+            f"menu instead ({err.strip()})"
+        )
+
+
 def arm(ctx: InstallContext) -> None:
     _write_validation(ctx)
     number = _add_boot_entry(ctx)
     ctx.new_entry = number
-    old_entry = None
-    needle = ctx.system.distro.name.split()[0].lower()
-    for entry in ctx.system.boot.entries:
-        if needle in entry.label.lower():
-            old_entry = entry.number
-            break
+    old_entry = _old_boot_entry(
+        ctx.system.boot, number, ctx.system.distro.name
+    )
     ctx.old_entry = old_entry
+    _set_boot_next(ctx, number)
     ctx.journal.set_state(
         "armed",
         new_subvol=ctx.new_subvol,
@@ -1509,11 +1604,17 @@ def replace(
     print()
     print(f"Target built in subvolume {ctx.new_subvol}.")
     print(f"Firmware entry: {ctx.new_entry or '(dry run)'}  (old entry: {ctx.old_entry or 'unknown'})")
-    print("The old system is still the default boot entry.")
+    if ctx.boot_next:
+        print("A one-shot BootNext points at the new entry; the old system stays")
+        print("first in BootOrder, so a failed boot falls back to it automatically.")
+    else:
+        print("The old system is still the default boot entry.")
     print()
     print("Next:")
-    print("  1. reboot and pick the LCM entry in the firmware boot menu (usually F12)")
-    print("  2. confirm networking, GPU and audio work")
+    print("  1. reboot; the new system is tried once automatically")
+    print('     (or pick "LCM <target>" in the firmware menu with F12)')
+    print("  2. confirm networking, GPU and audio work; a Fedora target relabels")
+    print("     SELinux on first boot and may reboot once by itself")
     print("  3. run `sudo lcm commit` to delete the old subvolume")
     print("  4. or run `sudo lcm rollback` to make the old system default again")
     return journal
@@ -1616,9 +1717,15 @@ def rollback(*, entry: str | None = None) -> None:
     order = _boot_order()
     order = [old_entry] + [item for item in order if item != old_entry]
     _set_boot_order(order)
+    # A pending one-shot BootNext would otherwise override this order on the
+    # next boot and try the new system again.
+    run_ok(["efibootmgr", "-N"])
     if journal:
         journal.set_state("rolled_back", rolled_back_at=utc_now())
-    print(f"Boot order now starts with {old_entry}.  Reboot to return to the old system.")
+    print(
+        f"Boot order now starts with {old_entry} and any one-shot BootNext is cleared."
+    )
+    print("Reboot to return to the old system.")
 
 
 def recover(*, cleanup: str | None = None, assume_yes: bool = False) -> str:

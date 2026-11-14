@@ -438,6 +438,7 @@ class Boot:
     entries: list[BootEntry]
     esp_mount: str | None
     uki_files: list[str] = field(default_factory=list)
+    boot_current: str | None = None
 
     def entry_for(self, needle: str) -> BootEntry | None:
         needle = needle.lower()
@@ -451,6 +452,7 @@ class Boot:
             "uefi": self.uefi,
             "secure_boot": self.secure_boot,
             "loader": self.loader,
+            "boot_current": self.boot_current,
             "entries": [entry.__dict__ for entry in self.entries],
         }
 
@@ -476,14 +478,16 @@ def _secure_boot() -> bool | None:
     return None
 
 
-def _boot_entries() -> tuple[list[BootEntry], list[str]]:
-    ok, out, _ = run_ok(["efibootmgr", "-v"])
-    if not ok:
-        return [], []
-
+def _parse_efibootmgr(
+    output: str,
+) -> tuple[list[BootEntry], list[str], str | None]:
     order_numbers: list[str] = []
     entries: list[BootEntry] = []
-    for line in out.splitlines():
+    boot_current: str | None = None
+    for line in output.splitlines():
+        if line.startswith("BootCurrent:"):
+            boot_current = line.split(":", 1)[1].strip().upper() or None
+            continue
         if line.startswith("BootOrder:"):
             order_numbers = [
                 chunk.strip() for chunk in line.split(":", 1)[1].split(",") if chunk
@@ -506,13 +510,22 @@ def _boot_entries() -> tuple[list[BootEntry], list[str]]:
             )
         )
     entries.sort(key=lambda entry: entry.order)
-    return entries, order_numbers
+    return entries, order_numbers, boot_current
+
+
+def _boot_entries() -> tuple[list[BootEntry], list[str], str | None]:
+    ok, out, _ = run_ok(["efibootmgr", "-v"])
+    if not ok:
+        return [], [], None
+    return _parse_efibootmgr(out)
 
 
 def detect_boot(storage: Storage) -> Boot:
     uefi = os.path.isdir("/sys/firmware/efi")
     secure = _secure_boot() if uefi else None
-    entries, _order = _boot_entries() if uefi else ([], [])
+    entries, _order, boot_current = (
+        _boot_entries() if uefi else ([], [], None)
+    )
 
     loader = "unknown"
     uki_files: list[str] = []
@@ -538,6 +551,7 @@ def detect_boot(storage: Storage) -> Boot:
         entries=entries,
         esp_mount=storage.esp_mount,
         uki_files=uki_files,
+        boot_current=boot_current,
     )
 
 

@@ -3,7 +3,9 @@
 from __future__ import annotations
 
 import argparse
+import contextlib
 import io
+import os
 import tarfile
 import tempfile
 import unittest
@@ -16,14 +18,17 @@ from lcm.restore import _extract, _never, _resolve
 from lcm.assess import analyze, needed_space_bytes
 from lcm.detect import (
     Boot,
+    BootEntry,
     Distro,
     Hardware,
     Storage,
     SystemInfo,
+    _parse_efibootmgr,
     detect_boot,
     family_of,
     parse_os_release,
 )
+from lcm.install import _old_boot_entry, _pick_kernel, _write_selinux_relabel
 from lcm.mapping import Database, MappingStats
 from lcm.profile import ConfigSpec, PackageSpec, Profile, UserSpec
 from lcm.util import LcmError, parse_size, safe_join
@@ -118,6 +123,142 @@ class TestDetectBoot(unittest.TestCase):
             boot = detect_boot(make_storage())
         self.assertFalse(boot.uefi)
         self.assertEqual(boot.entries, [])
+
+    def test_parse_efibootmgr_records_current_and_order(self):
+        output = (
+            "BootCurrent: 0003\n"
+            "Timeout: 1 seconds\n"
+            "BootOrder: 0001,0002,0003\n"
+            "Boot0001* Fedora\tHD(1,GPT,abc)/File(\\EFI\\fedora\\shimx64.efi)\n"
+            "Boot0002  Windows Boot Manager\tHD(1,GPT,abc)/File(\\EFI\\Microsoft\\bootmgfw.efi)\n"
+            "Boot0003* LCM debian\tHD(1,GPT,abc)/File(\\EFI\\Linux\\lcm.efi)\n"
+        )
+        entries, order, current = _parse_efibootmgr(output)
+        self.assertEqual(current, "0003")
+        self.assertEqual(order, ["0001", "0002", "0003"])
+        self.assertEqual(
+            [entry.number for entry in entries], ["0001", "0002", "0003"]
+        )
+        self.assertEqual(entries[0].label, "Fedora")
+        self.assertTrue(entries[0].active)
+        self.assertEqual(entries[1].label, "Windows Boot Manager")
+        self.assertFalse(entries[1].active)
+
+    def test_parse_efibootmgr_without_boot_current(self):
+        entries, order, current = _parse_efibootmgr("BootOrder: 0001\n")
+        self.assertIsNone(current)
+        self.assertEqual(entries, [])
+        self.assertEqual(order, ["0001"])
+
+
+class TestOldBootEntry(unittest.TestCase):
+    def _boot(self, entries, current=None):
+        return Boot(
+            uefi=True,
+            secure_boot=False,
+            loader="grub",
+            entries=entries,
+            esp_mount="/boot/efi",
+            boot_current=current,
+        )
+
+    def _entry(self, number, label):
+        return BootEntry(
+            number=number, label=label, active=True, loader="", order=int(number)
+        )
+
+    def test_boot_current_wins_over_label_match(self):
+        boot = self._boot(
+            [
+                self._entry("0001", "Fedora Linux"),
+                self._entry("0002", "Windows Boot Manager"),
+                self._entry("0003", "LCM debian"),
+            ],
+            current="0002",
+        )
+        self.assertEqual(_old_boot_entry(boot, "0003", "Fedora Linux"), "0002")
+
+    def test_fallback_uses_source_distro_name(self):
+        boot = self._boot(
+            [
+                self._entry("0001", "Windows Boot Manager"),
+                self._entry("0002", "Fedora Linux"),
+            ]
+        )
+        self.assertEqual(_old_boot_entry(boot, "0009", "Fedora Linux"), "0002")
+
+    def test_fallback_never_returns_the_new_entry(self):
+        boot = self._boot([self._entry("0001", "Fedora Linux")])
+        self.assertIsNone(_old_boot_entry(boot, "0001", "Fedora Linux"))
+
+
+class TestPickKernel(unittest.TestCase):
+    def _touch(self, path, mtime):
+        path.write_bytes(b"x")
+        os.utime(path, (mtime, mtime))
+
+    def test_rescue_kernel_is_never_selected(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            boot = Path(tmp) / "boot"
+            boot.mkdir()
+            self._touch(boot / "vmlinuz-6.1.0", 100)
+            self._touch(boot / "initrd.img-6.1.0", 100)
+            self._touch(boot / "vmlinuz-0-rescue-abc", 200)
+            self._touch(boot / "initrd.img-0-rescue-abc", 200)
+            kernel, initrd = _pick_kernel(Path(tmp))
+            self.assertEqual(kernel.name, "vmlinuz-6.1.0")
+            self.assertEqual(initrd.name, "initrd.img-6.1.0")
+
+    def test_initramfs_must_match_the_kernel_version(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            boot = Path(tmp) / "boot"
+            boot.mkdir()
+            self._touch(boot / "vmlinuz-6.2.0", 200)
+            self._touch(boot / "initrd.img-6.1.0", 100)
+            with self.assertRaises(LcmError):
+                _pick_kernel(Path(tmp))
+
+    def test_fedora_initramfs_name_is_paired(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            boot = Path(tmp) / "boot"
+            boot.mkdir()
+            self._touch(boot / "vmlinuz-6.2.0", 200)
+            self._touch(boot / "initramfs-6.2.0.img", 100)
+            kernel, initrd = _pick_kernel(Path(tmp))
+            self.assertEqual(kernel.name, "vmlinuz-6.2.0")
+            self.assertEqual(initrd.name, "initramfs-6.2.0.img")
+
+    def test_arch_kernel_and_initramfs_are_paired(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            boot = Path(tmp) / "boot"
+            boot.mkdir()
+            self._touch(boot / "vmlinuz-linux", 100)
+            self._touch(boot / "initramfs-linux.img", 100)
+            kernel, initrd = _pick_kernel(Path(tmp))
+            self.assertEqual(kernel.name, "vmlinuz-linux")
+            self.assertEqual(initrd.name, "initramfs-linux.img")
+
+
+class TestSelinuxMarker(unittest.TestCase):
+    def _ctx(self, root, family):
+        return argparse.Namespace(
+            target_family=family,
+            target_root=Path(root),
+            runner=argparse.Namespace(dry_run=False),
+            journal=argparse.Namespace(record=lambda *a, **k: None),
+        )
+
+    def test_fedora_target_is_marked_for_relabel(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            with contextlib.redirect_stdout(io.StringIO()):
+                _write_selinux_relabel(self._ctx(tmp, "fedora"))
+            self.assertTrue((Path(tmp) / ".autorelabel").is_file())
+
+    def test_other_targets_are_not_marked(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            with contextlib.redirect_stdout(io.StringIO()):
+                _write_selinux_relabel(self._ctx(tmp, "debian"))
+            self.assertFalse((Path(tmp) / ".autorelabel").exists())
 
 
 class TestMapping(unittest.TestCase):
