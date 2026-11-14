@@ -13,8 +13,10 @@ import hashlib
 import json
 import os
 import shutil
+import stat as stat_mod
 import tarfile
 import tempfile
+import time
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Callable
@@ -29,8 +31,28 @@ PROFILE = "profile.yaml"
 PACKAGES = "packages.json"
 CHECKSUMS = "checksums.sha256"
 
-# progress(label, files, bytes)
-Progress = Callable[[str, int, int], None]
+@dataclass(frozen=True)
+class ProgressEvent:
+    """One progress sample from a bundle-building phase.
+
+    ``done`` and ``total`` are bytes.  For compression, ``done`` counts input
+    bytes read and ``output`` is the compressed file size so far.
+    """
+
+    phase: str
+    label: str
+    done: int
+    total: int | None = None
+    files: int = 0
+    total_files: int | None = None
+    elapsed: float = 0.0
+    detail: str | None = None
+    output: int | None = None
+    finished: bool = False
+
+
+ProgressCallback = Callable[[ProgressEvent], None]
+CaptureReporter = Callable[[int, int, str | None], None]
 
 BUILTIN_EXCLUDES = {
     ".cache",
@@ -86,11 +108,17 @@ class Bundle:
 # creation
 # --------------------------------------------------------------------------
 
-def _sha256(path: Path) -> str:
+def _sha256(
+    path: Path, on_progress: Callable[[int], None] | None = None
+) -> str:
     digest = hashlib.sha256()
+    read = 0
     with open(path, "rb") as handle:
-        for chunk in iter(lambda: handle.read(1024 * 1024), b""):
+        for chunk in iter(lambda: handle.read(4 * 1024 * 1024), b""):
             digest.update(chunk)
+            read += len(chunk)
+            if on_progress is not None:
+                on_progress(read)
     return digest.hexdigest()
 
 
@@ -131,11 +159,48 @@ class _CaptureStats:
     bytes: int = 0
 
 
+class _CountingReader:
+    """File wrapper that reports how much tarfile has read.
+
+    tarfile reads in small blocks.  Reporting every block would create
+    millions of events on a large payload, so samples are limited to one per
+    ``interval`` bytes.  The caller still emits an exact final sample when the
+    member is complete.
+    """
+
+    def __init__(
+        self,
+        handle,
+        on_read: Callable[[int], None] | None = None,
+        interval: int = 4 * 1024 * 1024,
+    ) -> None:
+        self.handle = handle
+        self.on_read = on_read
+        self.interval = interval
+        self.count = 0
+        self.reported = 0
+
+    def read(self, size: int = -1) -> bytes:
+        data = self.handle.read(size)
+        self.count += len(data)
+        if (
+            self.on_read is not None
+            and self.count - self.reported >= self.interval
+        ):
+            self.reported = self.count
+            self.on_read(self.count)
+        return data
+
+    def __getattr__(self, name):
+        return getattr(self.handle, name)
+
+
 def _add_member(
     archive: tarfile.TarFile,
     path: Path,
     arcname: str,
     member_filter,
+    on_read: Callable[[int], None] | None = None,
 ) -> tarfile.TarInfo | None:
     try:
         info = archive.gettarinfo(str(path), arcname)
@@ -153,7 +218,12 @@ def _add_member(
             # unprivileged): skip it instead of aborting the whole bundle.
             return None
         try:
-            archive.addfile(info, handle)
+            source = (
+                _CountingReader(handle, on_read)
+                if on_read is not None
+                else handle
+            )
+            archive.addfile(info, source)
         finally:
             handle.close()
     else:
@@ -167,16 +237,26 @@ def _walk_into(
     arcname: str,
     member_filter,
     stats: _CaptureStats,
-    progress: Progress | None,
+    report: CaptureReporter | None,
 ) -> None:
-    info = _add_member(archive, path, arcname, member_filter)
+    def on_read(read: int) -> None:
+        if report is not None:
+            report(stats.bytes + read, stats.files, arcname)
+
+    info = _add_member(
+        archive,
+        path,
+        arcname,
+        member_filter,
+        on_read=on_read if report is not None else None,
+    )
     if info is None:
         return
     stats.files += 1
     if info.isreg():
         stats.bytes += max(info.size, 0)
-    if progress is not None:
-        progress(arcname, stats.files, stats.bytes)
+    if report is not None:
+        report(stats.bytes, stats.files, arcname)
     if path.is_symlink() or not path.is_dir():
         return
     try:
@@ -190,8 +270,66 @@ def _walk_into(
             f"{arcname}/{child.name}",
             member_filter,
             stats,
-            progress,
+            report,
         )
+
+
+def _measure_tree(
+    source_root: Path,
+    patterns: list[str],
+    excludes: list[str],
+) -> _CaptureStats:
+    """Count what `_tar_tree` will add, so capture can show an ETA.
+
+    This only stats paths; it does not read file contents.  It mirrors the
+    traversal and exclusion rules in `_tar_tree`, including the duplicate
+    suppression used when allowlist entries overlap.
+    """
+    blocked = excludes + sorted(BUILTIN_EXCLUDES)
+    seen: set[str] = set()
+    stats = _CaptureStats()
+
+    def visit(path: Path, arcname: str) -> None:
+        if arcname in seen or _excluded(arcname, blocked):
+            return
+        try:
+            st = path.lstat()
+        except OSError:
+            return
+        if (
+            stat_mod.S_ISCHR(st.st_mode)
+            or stat_mod.S_ISBLK(st.st_mode)
+            or stat_mod.S_ISFIFO(st.st_mode)
+            or stat_mod.S_ISSOCK(st.st_mode)
+        ):
+            return
+        seen.add(arcname)
+        stats.files += 1
+        if stat_mod.S_ISREG(st.st_mode):
+            stats.bytes += max(st.st_size, 0)
+        if not stat_mod.S_ISDIR(st.st_mode):
+            return
+        try:
+            children = sorted(path.iterdir())
+        except OSError:
+            return
+        for child in children:
+            visit(child, f"{arcname}/{child.name}")
+
+    for pattern in patterns:
+        candidate = source_root / pattern
+        if not candidate.exists():
+            continue
+        if not candidate.is_symlink() and candidate.is_dir():
+            try:
+                children = sorted(candidate.iterdir())
+            except OSError:
+                continue
+            for child in children:
+                visit(child, str(Path(pattern) / child.name))
+        else:
+            visit(candidate, pattern)
+    return stats
 
 
 def _tar_tree(
@@ -199,9 +337,38 @@ def _tar_tree(
     patterns: list[str],
     excludes: list[str],
     out: Path,
-    progress: Progress | None = None,
+    *,
+    label: str | None = None,
+    progress: ProgressCallback | None = None,
 ) -> None:
     out.parent.mkdir(parents=True, exist_ok=True)
+    phase_label = label or out.stem
+    started = time.monotonic()
+    measured = _measure_tree(source_root, patterns, excludes)
+
+    def emit(
+        done: int,
+        files: int,
+        detail: str | None = None,
+        *,
+        finished: bool = False,
+    ) -> None:
+        if progress is not None:
+            progress(
+                ProgressEvent(
+                    phase="capture",
+                    label=phase_label,
+                    done=done,
+                    total=measured.bytes,
+                    files=files,
+                    total_files=measured.files,
+                    elapsed=time.monotonic() - started,
+                    detail=detail,
+                    finished=finished,
+                )
+            )
+
+    emit(0, 0)
     member_filter = _make_filter(excludes + sorted(BUILTIN_EXCLUDES))
     stats = _CaptureStats()
     with tarfile.open(out, "w") as archive:
@@ -221,7 +388,7 @@ def _tar_tree(
                         str(Path(pattern) / child.name),
                         member_filter,
                         stats,
-                        progress,
+                        emit,
                     )
             else:
                 _walk_into(
@@ -230,17 +397,64 @@ def _tar_tree(
                     pattern,
                     member_filter,
                     stats,
-                    progress,
+                    emit,
                 )
+    emit(stats.bytes, stats.files, finished=True)
 
 
-def _checksums(root: Path) -> str:
+def _checksums(
+    root: Path, progress: ProgressCallback | None = None
+) -> str:
+    paths = [
+        path
+        for path in sorted(root.rglob("*"))
+        if path.is_file() and path.name != CHECKSUMS
+    ]
+    total = sum(path.stat().st_size for path in paths)
+    started = time.monotonic()
+
+    def emit(
+        done: int,
+        files: int,
+        detail: str | None = None,
+        *,
+        finished: bool = False,
+    ) -> None:
+        if progress is not None:
+            progress(
+                ProgressEvent(
+                    phase="checksums",
+                    label="payload",
+                    done=done,
+                    total=total,
+                    files=files,
+                    total_files=len(paths),
+                    elapsed=time.monotonic() - started,
+                    detail=detail,
+                    finished=finished,
+                )
+            )
+
+    emit(0, 0)
     lines = []
-    for path in sorted(root.rglob("*")):
-        if not path.is_file() or path.name == CHECKSUMS:
-            continue
+    done = 0
+    for index, path in enumerate(paths, 1):
         relative = path.relative_to(root).as_posix()
-        lines.append(f"{_sha256(path)}  {relative}")
+        base = done
+
+        def on_read(
+            read: int,
+            base: int = base,
+            relative: str = relative,
+            index: int = index,
+        ) -> None:
+            emit(base + read, index - 1, relative)
+
+        digest = _sha256(path, on_progress=on_read)
+        done += path.stat().st_size
+        lines.append(f"{digest}  {relative}")
+        emit(done, index, relative)
+    emit(done, len(paths), finished=True)
     return "\n".join(lines) + "\n"
 
 
@@ -258,6 +472,98 @@ def _skip_patterns(root: Path, paths: set[Path]) -> list[str]:
     return patterns
 
 
+def _add_staged_member(
+    archive: tarfile.TarFile,
+    path: Path,
+    arcname: str,
+    on_read: Callable[[int], None] | None = None,
+) -> tarfile.TarInfo | None:
+    info = archive.gettarinfo(str(path), arcname)
+    if info is None:
+        return None
+    if info.isreg():
+        with open(path, "rb") as handle:
+            source = (
+                _CountingReader(handle, on_read)
+                if on_read is not None
+                else handle
+            )
+            archive.addfile(info, source)
+    else:
+        archive.addfile(info)
+    return info
+
+
+def _compress_staging(
+    staging: Path,
+    partial: Path,
+    *,
+    progress: ProgressCallback | None = None,
+) -> None:
+    """Write the outer gzipped tar and report input bytes and output size."""
+    paths = sorted(staging.rglob("*"))
+    files = [path for path in paths if path.is_file()]
+    total = sum(path.stat().st_size for path in files)
+    total_files = len(files)
+    started = time.monotonic()
+
+    def emit(
+        done: int,
+        count: int,
+        detail: str | None = None,
+        *,
+        finished: bool = False,
+    ) -> None:
+        if progress is None:
+            return
+        try:
+            output = partial.stat().st_size
+        except OSError:
+            output = None
+        progress(
+            ProgressEvent(
+                phase="compress",
+                label="bundle",
+                done=done,
+                total=total,
+                files=count,
+                total_files=total_files,
+                elapsed=time.monotonic() - started,
+                detail=detail,
+                output=output,
+                finished=finished,
+            )
+        )
+
+    emit(0, 0)
+    done = 0
+    count = 0
+    with tarfile.open(partial, "w:gz", compresslevel=6) as archive:
+        for path in paths:
+            arcname = path.relative_to(staging).as_posix()
+            info = archive.gettarinfo(str(path), arcname)
+            if info is None:
+                continue
+            if info.isreg():
+                base = done
+
+                def on_read(
+                    read: int,
+                    base: int = base,
+                    arcname: str = arcname,
+                    count: int = count,
+                ) -> None:
+                    emit(base + read, count, arcname)
+
+                _add_staged_member(archive, path, arcname, on_read)
+                done += info.size
+                count += 1
+                emit(done, count, arcname)
+            else:
+                archive.addfile(info)
+    emit(done, count, finished=True)
+
+
 def create(
     out_path: str | Path,
     profile: Profile,
@@ -266,7 +572,7 @@ def create(
     *,
     include_payload: bool = True,
     staging_dir: str | Path | None = None,
-    progress: Progress | None = None,
+    progress: ProgressCallback | None = None,
 ) -> Path:
     """Build a `.lcmb` from a profile and captured state.
 
@@ -285,11 +591,6 @@ def create(
     )
     partial = out_path.with_name(out_path.name + ".partial")
     staging: Path | None = None
-
-    def report(label: str) -> Progress | None:
-        if progress is None:
-            return None
-        return lambda _arcname, files, size: progress(label, files, size)
 
     try:
         out_path.parent.mkdir(parents=True, exist_ok=True)
@@ -358,25 +659,23 @@ def create(
                         *_skip_patterns(user_home, own_paths),
                     ],
                     tar_path,
-                    progress=report(f"home:{user.name}"),
+                    label=f"home:{user.name}",
+                    progress=progress,
                 )
             _tar_tree(
                 etc,
                 profile.config.etc,
                 _skip_patterns(etc, own_paths),
                 staging / "payload" / "etc.tar",
-                progress=report("etc"),
+                label="etc",
+                progress=progress,
             )
 
-        (staging / CHECKSUMS).write_text(_checksums(staging), encoding="utf-8")
+        (staging / CHECKSUMS).write_text(
+            _checksums(staging, progress=progress), encoding="utf-8"
+        )
 
-        with tarfile.open(partial, "w:gz", compresslevel=6) as archive:
-            for path in sorted(staging.rglob("*")):
-                archive.add(
-                    path,
-                    arcname=path.relative_to(staging).as_posix(),
-                    recursive=False,
-                )
+        _compress_staging(staging, partial, progress=progress)
         os.replace(partial, out_path)
         try:
             os.chmod(out_path, 0o600)

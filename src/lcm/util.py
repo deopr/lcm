@@ -165,6 +165,25 @@ def utc_now() -> str:
 # formatting
 # --------------------------------------------------------------------------
 
+def human_duration(value: float | None) -> str:
+    """Compact, readable duration: 400ms, 4.2s, 18m 42s, 1h 02m 05s."""
+    if value is None:
+        return "?"
+    seconds = max(0.0, float(value))
+    if seconds < 1:
+        return f"{seconds * 1000:.0f}ms"
+    if seconds < 10:
+        return f"{seconds:.1f}s"
+    total = int(round(seconds))
+    if total < 60:
+        return f"{total}s"
+    minutes, sec = divmod(total, 60)
+    if minutes < 60:
+        return f"{minutes}m {sec:02d}s"
+    hours, minutes = divmod(minutes, 60)
+    return f"{hours}h {minutes:02d}m {sec:02d}s"
+
+
 def human_bytes(value: int | float | None) -> str:
     if value is None:
         return "?"

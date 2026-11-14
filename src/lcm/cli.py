@@ -12,7 +12,7 @@ import time
 from pathlib import Path
 
 from lcm import __version__, assess, bundle, detect, install, mapping, pkgs, profile as profile_mod, restore, validate
-from lcm.util import LcmError, Style, human_bytes
+from lcm.util import LcmError, Style, human_bytes, human_duration
 
 
 class _Parser(argparse.ArgumentParser):
@@ -34,39 +34,99 @@ def _info(args: argparse.Namespace, message: str) -> None:
 
 
 class _ExportProgress:
-    """Throttled file-count feedback for multi-gigabyte exports."""
+    """Live phase progress, including elapsed and estimated time left.
+
+    Capture, checksum and compression are separate phases.  Each one reports
+    bytes completed and total bytes, so a long single-file read or the silent
+    verification/compression passes still show movement and an ETA.
+    """
 
     def __init__(self) -> None:
         self.tty = sys.stderr.isatty()
         self.last = 0.0
-        self.label = ""
+        self.key: str | None = None
         self.active = False
-        self.files = 0
-        self.size = 0
-        self.shown: tuple[int, int] | None = None
+        self.phases: list[tuple[str, float]] = []
 
-    def __call__(self, label: str, files: int, size: int) -> None:
-        now = time.monotonic()
-        if label != self.label:
+    @staticmethod
+    def _name(event: bundle.ProgressEvent) -> str:
+        if event.phase == "capture":
+            return f"capture {event.label}"
+        if event.phase == "checksums":
+            return "verify checksums"
+        if event.phase == "compress":
+            return "compress bundle"
+        return event.label or event.phase
+
+    def __call__(self, event: bundle.ProgressEvent) -> None:
+        key = f"{event.phase}:{event.label}"
+        if key != self.key:
             self._end_line()
-            self.label = label
+            self.key = key
             self.last = 0.0
-        self.files, self.size = files, size
+        if event.finished:
+            self._render(event, finished=True)
+            self._end_line()
+            self.phases.append((self._name(event), event.elapsed))
+            self.key = None
+            return
+        now = time.monotonic()
         if now - self.last < (1.0 if self.tty else 20.0):
             return
-        self._render()
+        self.last = now
+        self._render(event)
 
-    def _render(self) -> None:
-        self.last = time.monotonic()
+    def _render(
+        self, event: bundle.ProgressEvent, *, finished: bool = False
+    ) -> None:
+        name = self._name(event)
+        if finished:
+            text = (
+                f"  {name}: done in {human_duration(event.elapsed)} "
+                f"({human_bytes(event.done)}"
+            )
+            if event.files:
+                text += f", {event.files:,} files"
+            text += ")"
+            if event.phase == "compress" and event.output is not None:
+                text += f", {human_bytes(event.output)} written"
+        else:
+            parts = []
+            if event.total is not None and event.total > 0:
+                percent = min(100, int(event.done * 100 / event.total))
+                parts.append(f"{percent}%")
+                parts.append(
+                    f"{human_bytes(event.done)} / {human_bytes(event.total)}"
+                )
+            else:
+                parts.append(human_bytes(event.done))
+            if event.total_files:
+                parts.append(
+                    f"{event.files:,} / {event.total_files:,} files"
+                )
+            elif event.files:
+                parts.append(f"{event.files:,} files")
+            if event.phase == "compress" and event.output:
+                parts.append(f"{human_bytes(event.output)} written")
+            parts.append(f"elapsed {human_duration(event.elapsed)}")
+            if (
+                event.total is not None
+                and event.done > 0
+                and event.done < event.total
+                and event.elapsed >= 0.5
+            ):
+                rate = event.done / event.elapsed
+                remaining = (event.total - event.done) / rate
+                parts.append(f"~{human_duration(remaining)} left")
+            elif event.total is not None and event.done >= event.total:
+                parts.append("finishing")
+            else:
+                parts.append("estimating time left")
+            text = f"  {name}: " + " | ".join(parts)
+
         self.active = True
-        self.shown = (self.files, self.size)
-        noun = "file" if self.files == 1 else "files"
-        text = (
-            f"  capturing {self.label}: {self.files:,} {noun}, "
-            f"{human_bytes(self.size)}"
-        )
         if self.tty:
-            print(f"\r{text}", end="", file=sys.stderr, flush=True)
+            print(f"\r{text}\033[K", end="", file=sys.stderr, flush=True)
         else:
             print(text, file=sys.stderr, flush=True)
 
@@ -76,9 +136,24 @@ class _ExportProgress:
         self.active = False
 
     def finish(self) -> None:
-        if self.active and (self.files, self.size) != self.shown:
-            self._render()
         self._end_line()
+
+    def render_summary(self) -> str:
+        if not self.phases:
+            return ""
+        width = max(len(name) for name, _ in self.phases)
+        lines = ["Phase timings:"]
+        for name, seconds in self.phases:
+            lines.append(f"  {name:<{width}}  {human_duration(seconds)}")
+        total = sum(seconds for _, seconds in self.phases)
+        lines.append(f"  {'total':<{width}}  {human_duration(total)}")
+        return "\n".join(lines)
+
+    def timings(self) -> list[dict]:
+        return [
+            {"phase": name, "seconds": round(seconds, 3)}
+            for name, seconds in self.phases
+        ]
 
 
 def _emit_json(data) -> None:
@@ -268,7 +343,7 @@ def cmd_export(args: argparse.Namespace) -> int:
         )
 
     assessment = assess.analyze(system, target, database, profile, capture)
-    progress = _ExportProgress() if not args.no_payload else None
+    progress = _ExportProgress()
     try:
         written = bundle.create(
             out,
@@ -290,6 +365,7 @@ def cmd_export(args: argparse.Namespace) -> int:
         "profile": str(profile.name),
         "packages": assessment.packages.stats.to_dict(),
         "staging": str(staging) if staging else str(written.parent),
+        "timings": progress.timings() if progress else [],
     }
     if getattr(args, "json", False):
         _emit_json(payload)
@@ -300,6 +376,11 @@ def cmd_export(args: argparse.Namespace) -> int:
         f"  {assessment.packages.stats.total} packages · "
         f"{assessment.packages.stats.percent:.0f}% mapped for {target}"
     )
+    if progress:
+        summary = progress.render_summary()
+        if summary:
+            print()
+            print(summary)
     if args.full_home:
         print(
             "  This bundle may contain credentials; it is mode 0600. "

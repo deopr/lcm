@@ -143,6 +143,29 @@ The staged payload and the compressed bundle both exist at the same time, so
 budget roughly twice the selected home data and check `df -h` first. Existing
 bundles are not overwritten unless you pass `--force`.
 
+A large export is not one silent block. LCM reports each phase separately:
+capture, checksum verification and compression. Every line shows the bytes
+completed, elapsed time and an estimated time left, and the final output lists
+the exact duration of each phase:
+
+```text
+  capture home:deopr: 51% | 42.7 GiB / 83.1 GiB | 48,231 / 100,454 files | elapsed 18m 04s | ~17m 12s left
+  verify checksums: 26% | 22.9 GiB / 88.8 GiB | 12 / 20 files | elapsed 4m 12s | ~12m 32s left
+  compress bundle: 37% | 33.1 GiB / 88.8 GiB | 9 / 20 files | 12.3 GiB written | elapsed 18m 20s | ~30m 33s left
+
+Phase timings:
+  capture home:deopr  18m 42s
+  capture etc          0.1s
+  verify checksums     2m 12s
+  compress bundle     21m 08s
+  total               42m 03s
+```
+
+The checksum and compression passes read the entire staged payload, so they can
+look idle in a process list even while bytes are moving. Watch the byte counter
+and the ETA rather than the CPU percentage. Progress goes to stderr, so
+`--json` output on stdout stays valid.
+
 A bundle is a continuity snapshot, not a disk image. It does not clone
 `/var/lib`, package versions, third-party repositories, container images or
 non-allowlisted `/etc` state. Treat it as "my setup and my files", not "the

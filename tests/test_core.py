@@ -13,12 +13,14 @@ from pathlib import Path
 
 from lcm import bundle, pkgs
 from lcm.cli import (
+    _ExportProgress,
     _apply_home_options,
     _export_destination,
     _looks_like_bundle,
     build_parser,
     main,
 )
+from lcm.bundle import ProgressEvent
 from lcm.profile import DEFAULT_NEVER
 from lcm.restore import _extract, _never, _resolve
 from lcm.assess import analyze, needed_space_bytes
@@ -37,7 +39,7 @@ from lcm.detect import (
 from lcm.install import _old_boot_entry, _pick_kernel, _write_selinux_relabel
 from lcm.mapping import Database, MappingStats
 from lcm.profile import ConfigSpec, PackageSpec, Profile, UserSpec
-from lcm.util import LcmError, parse_size, safe_join
+from lcm.util import LcmError, human_duration, parse_size, safe_join
 
 
 def make_storage(**overrides) -> Storage:
@@ -362,6 +364,12 @@ class TestSizes(unittest.TestCase):
         self.assertEqual(parse_size("150 MiB"), 150 * 1024**2)
         self.assertEqual(parse_size("10G"), 10 * 1024**3)
 
+    def test_human_duration(self):
+        self.assertEqual(human_duration(0.4), "400ms")
+        self.assertEqual(human_duration(42), "42s")
+        self.assertEqual(human_duration(1122), "18m 42s")
+        self.assertEqual(human_duration(3725), "1h 02m 05s")
+
 
 class TestSafety(unittest.TestCase):
     def test_safe_join_rejects_absolute(self):
@@ -443,9 +451,7 @@ class TestBundle(unittest.TestCase):
                 {},
                 make_system(),
                 staging_dir=staging,
-                progress=lambda label, files, size: events.append(
-                    (label, files, size)
-                ),
+                progress=events.append,
             )
             loaded = bundle.load(out)
             try:
@@ -461,7 +467,24 @@ class TestBundle(unittest.TestCase):
             )
             self.assertFalse(any(name.endswith("backup.lcmb") for name in names))
             self.assertTrue(
-                any(label == "home:alice" and files > 0 for label, files, _ in events)
+                any(
+                    event.phase == "capture"
+                    and event.label == "home:alice"
+                    and event.files > 0
+                    for event in events
+                )
+            )
+            self.assertTrue(
+                any(
+                    event.phase == "checksums" and event.finished
+                    for event in events
+                )
+            )
+            self.assertTrue(
+                any(
+                    event.phase == "compress" and event.finished
+                    for event in events
+                )
             )
 
     def test_tamper_detected(self):
@@ -561,6 +584,32 @@ class TestHomeCapture(unittest.TestCase):
                 names = [member.name for member in archive.getmembers()]
             self.assertEqual(len(names), len(set(names)))
             self.assertIn("Documents/note.txt", names)
+
+    def test_measure_tree_matches_tar_tree(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            home = Path(tmp) / "home"
+            (home / "Documents").mkdir(parents=True)
+            (home / "Documents/note.txt").write_text("note", encoding="utf-8")
+            (home / "Pictures").mkdir()
+            (home / "Pictures/pic.bin").write_bytes(b"x" * 4096)
+            (home / ".cache").mkdir()
+            (home / ".cache/junk").write_bytes(b"x" * 8192)
+            os.symlink("Documents/note.txt", home / "note-link")
+
+            measured = bundle._measure_tree(
+                home, [".", "Documents"], DEFAULT_NEVER
+            )
+            out = Path(tmp) / "home.tar"
+            bundle._tar_tree(
+                home, [".", "Documents"], DEFAULT_NEVER, out
+            )
+            with tarfile.open(out) as archive:
+                members = archive.getmembers()
+            self.assertEqual(measured.files, len(members))
+            self.assertEqual(
+                measured.bytes,
+                sum(member.size for member in members if member.isreg()),
+            )
 
     def test_never_matches_multi_component_prefix(self):
         self.assertTrue(_never(".local/share/Steam/apps/x", DEFAULT_NEVER))
@@ -670,6 +719,46 @@ class TestExportDestination(unittest.TestCase):
         args = argparse.Namespace(path="a.lcmb", output="b.lcmb")
         with self.assertRaises(LcmError):
             _export_destination(args, Profile(name="host"))
+
+
+class TestExportProgress(unittest.TestCase):
+    def test_live_line_shows_elapsed_and_eta(self):
+        progress = _ExportProgress()
+        progress.tty = False
+        event = ProgressEvent(
+            phase="compress",
+            label="bundle",
+            done=33 * 1024**3,
+            total=88 * 1024**3,
+            files=5,
+            total_files=20,
+            elapsed=1100,
+            output=12 * 1024**3,
+        )
+        output = io.StringIO()
+        with contextlib.redirect_stderr(output):
+            progress._render(event)
+        line = output.getvalue()
+        self.assertIn("compress bundle:", line)
+        self.assertIn("37%", line)
+        self.assertIn("elapsed 18m 20s", line)
+        self.assertIn("left", line)
+        self.assertIn("written", line)
+
+    def test_summary_lists_every_phase(self):
+        progress = _ExportProgress()
+        progress.phases = [
+            ("capture home:deopr", 1122),
+            ("verify checksums", 132),
+            ("compress bundle", 65),
+        ]
+        summary = progress.render_summary()
+        self.assertIn("Phase timings:", summary)
+        self.assertIn("capture home:deopr", summary)
+        self.assertIn("18m 42s", summary)
+        self.assertIn("1m 05s", summary)
+        self.assertIn("total", summary)
+        self.assertEqual(progress.timings()[0]["seconds"], 1122)
 
 
 class TestCliParsing(unittest.TestCase):
