@@ -4,15 +4,81 @@ from __future__ import annotations
 
 import argparse
 import json
+import os
+import shlex
+import shutil
 import sys
+import time
 from pathlib import Path
 
 from lcm import __version__, assess, bundle, detect, install, mapping, pkgs, profile as profile_mod, restore, validate
-from lcm.util import LcmError, Style
+from lcm.util import LcmError, Style, human_bytes
+
+
+class _Parser(argparse.ArgumentParser):
+    """Keep command examples readable instead of re-wrapping them."""
+
+    def __init__(self, *args, **kwargs):
+        kwargs.setdefault("formatter_class", argparse.RawDescriptionHelpFormatter)
+        super().__init__(*args, **kwargs)
 
 
 def _style(args: argparse.Namespace) -> Style:
     return Style(sys.stdout.isatty() and not getattr(args, "no_color", False))
+
+
+def _info(args: argparse.Namespace, message: str) -> None:
+    """Human status goes to stderr when stdout must stay valid JSON."""
+    stream = sys.stderr if getattr(args, "json", False) else sys.stdout
+    print(message, file=stream, flush=True)
+
+
+class _ExportProgress:
+    """Throttled file-count feedback for multi-gigabyte exports."""
+
+    def __init__(self) -> None:
+        self.tty = sys.stderr.isatty()
+        self.last = 0.0
+        self.label = ""
+        self.active = False
+        self.files = 0
+        self.size = 0
+        self.shown: tuple[int, int] | None = None
+
+    def __call__(self, label: str, files: int, size: int) -> None:
+        now = time.monotonic()
+        if label != self.label:
+            self._end_line()
+            self.label = label
+            self.last = 0.0
+        self.files, self.size = files, size
+        if now - self.last < (1.0 if self.tty else 20.0):
+            return
+        self._render()
+
+    def _render(self) -> None:
+        self.last = time.monotonic()
+        self.active = True
+        self.shown = (self.files, self.size)
+        noun = "file" if self.files == 1 else "files"
+        text = (
+            f"  capturing {self.label}: {self.files:,} {noun}, "
+            f"{human_bytes(self.size)}"
+        )
+        if self.tty:
+            print(f"\r{text}", end="", file=sys.stderr, flush=True)
+        else:
+            print(text, file=sys.stderr, flush=True)
+
+    def _end_line(self) -> None:
+        if self.active and self.tty:
+            print(file=sys.stderr)
+        self.active = False
+
+    def finish(self) -> None:
+        if self.active and (self.files, self.size) != self.shown:
+            self._render()
+        self._end_line()
 
 
 def _emit_json(data) -> None:
@@ -122,6 +188,31 @@ def _apply_home_options(profile, args: argparse.Namespace) -> None:
     ]
 
 
+def _export_destination(args: argparse.Namespace, profile) -> Path:
+    """Resolve where the bundle should be written.
+
+    PATH and --output are equivalent; a file, an existing directory or a
+    trailing slash are all accepted.  With no destination, use the current
+    directory and a timestamped name.
+    """
+    positional = getattr(args, "path", None)
+    option = getattr(args, "output", None)
+    if positional and option:
+        raise LcmError(
+            "choose the export destination once: give PATH or --output, not both"
+        )
+    chosen = option or positional
+    if not chosen:
+        return Path.cwd() / bundle.suggested_name(profile)
+
+    out = Path(chosen).expanduser()
+    if out.is_dir() or str(chosen).endswith(("/", os.sep)):
+        out = out / bundle.suggested_name(profile)
+    if out.suffix.lower() != ".lcmb":
+        out = out.with_name(out.name + ".lcmb")
+    return Path(os.path.abspath(out))
+
+
 def cmd_export(args: argparse.Namespace) -> int:
     system = detect.detect_system()
     database = mapping.Database()
@@ -130,34 +221,99 @@ def cmd_export(args: argparse.Namespace) -> int:
         profile.name = args.name
     _apply_home_options(profile, args)
     target = args.target or system.distro.id
-    assessment = assess.analyze(system, target, database, profile, capture)
 
-    out = Path(args.path)
-    if out.is_dir() or args.path.endswith("/"):
-        out = out / bundle.suggested_name(profile)
-    written = bundle.create(
-        out,
-        profile,
-        _packages_payload(assessment),
-        system,
-        include_payload=not args.no_payload,
-    )
+    out = _export_destination(args, profile)
+    if out.exists() and not getattr(args, "force", False):
+        raise LcmError(
+            f"refusing to overwrite an existing bundle: {out}\n"
+            "choose another name, or pass --force to replace it"
+        )
+    if not out.parent.is_dir():
+        raise LcmError(
+            f"output directory does not exist: {out.parent}\n"
+            "create or mount it first (for example: mkdir -p /mnt/storage)"
+        )
+    if not os.access(out.parent, os.W_OK):
+        raise LcmError(f"output directory is not writable: {out.parent}")
+
+    staging = None
+    if getattr(args, "staging_dir", None):
+        staging = Path(
+            os.path.abspath(Path(args.staging_dir).expanduser())
+        )
+        if not staging.is_dir():
+            raise LcmError(
+                f"staging directory does not exist: {staging}\n"
+                "create or mount it first"
+            )
+        if not os.access(staging, os.W_OK):
+            raise LcmError(f"staging directory is not writable: {staging}")
+
+    free = shutil.disk_usage(out.parent).free
+    _info(args, f"Destination: {out}")
+    _info(args, f"  free space: {human_bytes(free)}")
+    if staging is not None:
+        staging_free = shutil.disk_usage(staging).free
+        _info(
+            args,
+            f"Staging: {staging} ({human_bytes(staging_free)} free)",
+        )
+    else:
+        _info(args, "Staging: next to the output (same filesystem)")
+    if args.full_home:
+        _info(
+            args,
+            "Mode: full home. Staging and the bundle are large; "
+            "check the free space above.",
+        )
+
+    assessment = assess.analyze(system, target, database, profile, capture)
+    progress = _ExportProgress() if not args.no_payload else None
+    try:
+        written = bundle.create(
+            out,
+            profile,
+            _packages_payload(assessment),
+            system,
+            include_payload=not args.no_payload,
+            staging_dir=staging,
+            progress=progress,
+        )
+    finally:
+        if progress is not None:
+            progress.finish()
+
+    size = written.stat().st_size
     payload = {
         "bundle": str(written),
-        "size": written.stat().st_size,
+        "size": size,
         "profile": str(profile.name),
         "packages": assessment.packages.stats.to_dict(),
+        "staging": str(staging) if staging else str(written.parent),
     }
     if getattr(args, "json", False):
         _emit_json(payload)
-    else:
-        print(f"Wrote {written}")
+        return 0
+
+    print(f"Wrote {written} ({human_bytes(size)})")
+    print(
+        f"  {assessment.packages.stats.total} packages · "
+        f"{assessment.packages.stats.percent:.0f}% mapped for {target}"
+    )
+    if args.full_home:
         print(
-            f"  {assessment.packages.stats.total} packages · "
-            f"{assessment.packages.stats.percent:.0f}% mapped for {target}"
+            "  This bundle may contain credentials; it is mode 0600. "
+            "Encrypt the disk or NAS it lives on."
         )
-        if profile.warnings:
-            print("  warnings: " + "; ".join(profile.warnings))
+    if profile.warnings:
+        print("  warnings: " + "; ".join(profile.warnings))
+    print()
+    print("Preview it on the target machine with:")
+    print(f"  lcm restore {shlex.quote(str(written))}")
+    print("Apply it with:")
+    print(
+        f"  sudo lcm restore {shlex.quote(str(written))} --apply --yes"
+    )
     return 0
 
 
@@ -334,46 +490,141 @@ def cmd_mapping(args: argparse.Namespace) -> int:
 # --------------------------------------------------------------------------
 
 def build_parser() -> argparse.ArgumentParser:
-    parser = argparse.ArgumentParser(
+    parser = _Parser(
         prog="lcm",
-        description="Linux Continuity Manager: transactional distro replacement, "
-        "with a rollback button.",
+        description=(
+            "Linux Continuity Manager: move this machine to another distro,\n"
+            "or carry its setup to a fresh install with a portable .lcmb bundle."
+        ),
+        epilog=(
+            "Common workflows:\n"
+            "  lcm export -o ~/lcm-backup.lcmb\n"
+            "  lcm export --full-home -o /mnt/storage/lcm-full.lcmb\n"
+            "  lcm export --full-home -o /mnt/nas/lcm-full.lcmb "
+            "--staging-dir /mnt/storage\n"
+            "  lcm restore /mnt/storage/lcm-full.lcmb\n"
+            "  sudo lcm restore /mnt/storage/lcm-full.lcmb --apply --yes\n"
+            "  lcm check --target arch\n"
+            "  lcm plan --target arch\n"
+            "\n"
+            "Run 'lcm <command> --help' for options and more examples."
+        ),
     )
     parser.add_argument("--version", action="version", version=f"lcm {__version__}")
     parser.add_argument("--no-color", action="store_true", help="disable ANSI colour")
     parser.add_argument("--json", action="store_true", help="machine-readable output")
 
-    sub = parser.add_subparsers(dest="command", required=True)
+    sub = parser.add_subparsers(
+        dest="command", title="commands", metavar="<command>"
+    )
 
-    check = sub.add_parser("check", help="read-only risk assessment for a target")
-    check.add_argument("--target", required=True, help="target distro id, e.g. pikaos, arch, fedora")
-    check.add_argument("--profile", help="use a .lcm.yaml profile instead of capturing")
+    check = sub.add_parser(
+        "check",
+        help="check whether this machine can be replaced (read-only)",
+        description="Assess this machine against a target distro. Nothing is changed.",
+        epilog=(
+            "Examples:\n"
+            "  lcm check --target arch\n"
+            "  lcm check --target debian --profile my.lcm.yaml"
+        ),
+    )
+    check.add_argument(
+        "--target", required=True, help="target distro id, e.g. arch, debian, fedora"
+    )
+    check.add_argument(
+        "--profile", help="use this .lcm.yaml instead of capturing the current system"
+    )
     _add_json(check)
     check.set_defaults(func=cmd_check)
 
-    plan = sub.add_parser("plan", help="show the exact migration plan")
-    plan.add_argument("--target", required=True)
-    plan.add_argument("--profile")
+    plan = sub.add_parser(
+        "plan",
+        help="show what replace would do (read-only)",
+        description="Show the exact steps replace would run. Nothing is changed.",
+        epilog=(
+            "Examples:\n"
+            "  lcm plan --target arch\n"
+            "  lcm plan --target debian --profile my.lcm.yaml"
+        ),
+    )
+    plan.add_argument(
+        "--target", required=True, help="target distro id, e.g. arch, debian, fedora"
+    )
+    plan.add_argument(
+        "--profile", help="use this .lcm.yaml instead of capturing the current system"
+    )
     _add_json(plan)
     plan.set_defaults(func=cmd_plan)
 
-    export = sub.add_parser("export", help="capture this system into a .lcmb bundle")
-    export.add_argument("path", help="output file or directory")
-    export.add_argument("--name", help="profile name")
-    export.add_argument("--target", help="target distro id for the mapping preview")
-    export.add_argument("--profile", help="start from an existing profile")
-    export.add_argument("--no-payload", action="store_true", help="metadata only")
+    export = sub.add_parser(
+        "export",
+        aliases=["backup"],
+        help="save this machine as a portable .lcmb file",
+        description=(
+            "Capture packages, dotfiles and optionally personal files into one\n"
+            "portable .lcmb file. This is a continuity backup, not a disk image."
+        ),
+        epilog=(
+            "Examples:\n"
+            "  lcm export -o ~/lcm-backup.lcmb\n"
+            "  lcm export --full-home -o /mnt/storage/lcm-full.lcmb\n"
+            "  lcm export --full-home -o /mnt/nas/lcm-full.lcmb "
+            "--staging-dir /mnt/storage\n"
+            "  lcm export --include-home Documents --include-home Projects "
+            "-o /mnt/storage/lcm.lcmb\n"
+            "  lcm export --no-payload -o /tmp/packages.lcmb\n"
+            "\n"
+            "Staging defaults to the output's filesystem. Use --staging-dir when\n"
+            "the output is on a NAS and you want scratch space on a local disk.\n"
+            "A full-home export needs room for the staged payload plus the\n"
+            "compressed .lcmb."
+        ),
+    )
+    export.add_argument(
+        "path",
+        nargs="?",
+        help="destination file or directory (same as --output)",
+    )
+    export.add_argument(
+        "-o",
+        "--output",
+        metavar="PATH",
+        help="where to write the .lcmb; a file or an existing directory",
+    )
+    export.add_argument("--name", help="profile name (default: hostname)")
+    export.add_argument(
+        "--target", help="target distro id for the package-mapping preview"
+    )
+    export.add_argument("--profile", help="start from an existing .lcm.yaml")
+    export.add_argument(
+        "--no-payload",
+        action="store_true",
+        help="metadata only; skip home and /etc file payloads",
+    )
     export.add_argument(
         "--full-home",
         action="store_true",
-        help="include the whole home, excluding caches, Trash, Downloads and games",
+        help=(
+            "include the whole home except caches, Trash, Downloads and games "
+            "(can be very large)"
+        ),
     )
     export.add_argument(
         "--include-home",
         action="append",
         default=[],
         metavar="PATH",
-        help="extra home-relative path to include (repeatable)",
+        help="add a home-relative path (repeatable; overrides an exclusion)",
+    )
+    export.add_argument(
+        "--staging-dir",
+        metavar="DIR",
+        help="scratch space for payload tars (default: next to the output)",
+    )
+    export.add_argument(
+        "--force",
+        action="store_true",
+        help="overwrite an existing bundle",
     )
     _add_json(export)
     export.set_defaults(func=cmd_export)
@@ -381,13 +632,32 @@ def build_parser() -> argparse.ArgumentParser:
     restore_cmd = sub.add_parser(
         "restore",
         aliases=["import"],
-        help="apply a .lcmb/.lcm bundle or .lcm.yaml profile",
+        help="preview or apply a .lcmb bundle on this machine",
+        description=(
+            "Apply packages and configuration from a bundle or profile.\n"
+            "The default is a dry run; --apply actually writes changes."
+        ),
+        epilog=(
+            "Examples:\n"
+            "  lcm restore /mnt/storage/lcm-full.lcmb\n"
+            "  sudo lcm restore /mnt/storage/lcm-full.lcmb --apply --yes\n"
+            "  sudo lcm restore bundle.lcmb --apply --step packages\n"
+            "  sudo lcm restore bundle.lcmb --apply --try-raw --no-flatpak"
+        ),
     )
     restore_cmd.add_argument(
         "bundle", help=".lcmb/.lcm bundle or .lcm/.lcm.yaml profile"
     )
-    restore_cmd.add_argument("--apply", action="store_true", help="actually write changes")
-    restore_cmd.add_argument("--step", help="packages,config,services")
+    restore_cmd.add_argument(
+        "--apply",
+        action="store_true",
+        help="write changes (without this, restore only previews)",
+    )
+    restore_cmd.add_argument(
+        "--step",
+        metavar="STEPS",
+        help="comma-separated steps: packages,config,services",
+    )
     restore_cmd.add_argument(
         "--no-flatpak", action="store_true", help="skip Flatpak applications"
     )
@@ -397,57 +667,139 @@ def build_parser() -> argparse.ArgumentParser:
         help="also try unmapped source package names unchanged (best effort)",
     )
     restore_cmd.add_argument(
-        "--strict", action="store_true", help="exit 1 if any package failed"
+        "--strict",
+        action="store_true",
+        help="exit 1 if any package could not be installed",
     )
-    restore_cmd.add_argument("--yes", action="store_true")
+    restore_cmd.add_argument(
+        "--yes", action="store_true", help="do not ask for confirmation"
+    )
     _add_json(restore_cmd)
     restore_cmd.set_defaults(func=cmd_restore)
 
-    replace_cmd = sub.add_parser("replace", help="build the target as a new btrfs subvolume")
-    replace_cmd.add_argument("--target", required=True)
-    replace_cmd.add_argument("--profile")
-    replace_cmd.add_argument("--mirror", help="base mirror, or Arch bootstrap tarball URL")
+    replace_cmd = sub.add_parser(
+        "replace",
+        help="build another distro beside this one (advanced)",
+        description=(
+            "Build a new distro in a btrfs subvolume without touching the\n"
+            "running system. The old system stays bootable until commit."
+        ),
+        epilog=(
+            "Examples:\n"
+            "  lcm check --target debian\n"
+            "  sudo lcm replace --target debian --dry-run\n"
+            "  sudo lcm replace --target debian --yes"
+        ),
+    )
+    replace_cmd.add_argument(
+        "--target", required=True, help="target distro id, e.g. arch, debian, fedora"
+    )
+    replace_cmd.add_argument(
+        "--profile", help="use this .lcm.yaml instead of capturing the current system"
+    )
+    replace_cmd.add_argument(
+        "--mirror", help="base mirror, or Arch bootstrap tarball URL"
+    )
     replace_cmd.add_argument("--suite", help="target suite/release")
     replace_cmd.add_argument("--repo", help="extra Debian-family repository line")
-    replace_cmd.add_argument("--repo-key", help="keyring URL for --repo (.deb or .asc)")
-    replace_cmd.add_argument("--package", action="append", help="extra package to install")
-    replace_cmd.add_argument("--meta", action="append", help="target meta package(s)")
-    replace_cmd.add_argument("--yes", action="store_true")
-    replace_cmd.add_argument("--dry-run", action="store_true")
+    replace_cmd.add_argument(
+        "--repo-key", help="keyring URL for --repo (.deb or .asc)"
+    )
+    replace_cmd.add_argument(
+        "--package", action="append", help="extra package to install (repeatable)"
+    )
+    replace_cmd.add_argument(
+        "--meta", action="append", help="target meta package(s) (repeatable)"
+    )
+    replace_cmd.add_argument(
+        "--yes", action="store_true", help="do not ask for confirmation"
+    )
+    replace_cmd.add_argument(
+        "--dry-run", action="store_true", help="show the plan and commands only"
+    )
     replace_cmd.set_defaults(func=cmd_replace)
 
-    commit = sub.add_parser("commit", help="delete the old system after validation")
-    commit.add_argument("--yes", action="store_true")
-    commit.add_argument("--keep-old", action="store_true", help="keep the old subvolume")
-    commit.add_argument("--force", action="store_true", help="ignore failed validation")
+    commit = sub.add_parser(
+        "commit",
+        help="delete the old system after the new one validates",
+        description=(
+            "Remove the old subvolume and firmware entry. Run this from the new\n"
+            "system after first-boot validation has passed."
+        ),
+    )
+    commit.add_argument(
+        "--yes", action="store_true", help="do not ask for confirmation"
+    )
+    commit.add_argument(
+        "--keep-old", action="store_true", help="keep the old subvolume"
+    )
+    commit.add_argument(
+        "--force", action="store_true", help="ignore failed validation"
+    )
     commit.set_defaults(func=cmd_commit)
 
-    rollback = sub.add_parser("rollback", help="make the old system the default boot entry")
+    rollback = sub.add_parser(
+        "rollback",
+        help="boot the old system again",
+        description="Make the old firmware entry first and clear any one-shot BootNext.",
+    )
     rollback.add_argument("--entry", help="explicit BootNNNN entry")
     rollback.set_defaults(func=cmd_rollback)
 
-    recover = sub.add_parser("recover", help="inspect or clean up unfinished attempts")
+    recover = sub.add_parser(
+        "recover",
+        help="inspect or clean up unfinished replacements",
+        description="List replacement journals or remove an unfinished target.",
+    )
     recover.add_argument("--cleanup", metavar="ID")
-    recover.add_argument("--yes", action="store_true")
+    recover.add_argument(
+        "--yes", action="store_true", help="do not ask for confirmation"
+    )
     _add_json(recover)
     recover.set_defaults(func=cmd_recover)
 
-    validate_cmd = sub.add_parser("validate", help="run first-boot checks on this system")
+    validate_cmd = sub.add_parser(
+        "validate",
+        help="re-run first-boot checks on this system",
+        description="Check services, root subvolume, network, GPU and audio.",
+    )
     validate_cmd.add_argument("--max-failed", type=int, default=0)
-    validate_cmd.add_argument("--no-write", action="store_true")
+    validate_cmd.add_argument(
+        "--no-write", action="store_true", help="do not write validation results"
+    )
     _add_json(validate_cmd)
     validate_cmd.set_defaults(func=cmd_validate)
 
-    journal = sub.add_parser("journal", help="list or show replacement journals")
-    journal.add_argument("action", nargs="?", choices=["list", "show"], default="list")
+    journal = sub.add_parser(
+        "journal",
+        help="inspect replacement history",
+        description="List replacement journals or show one in detail.",
+    )
+    journal.add_argument(
+        "action", nargs="?", choices=["list", "show"], default="list"
+    )
     journal.add_argument("id", nargs="?")
     _add_json(journal)
     journal.set_defaults(func=cmd_journal)
 
-    mapping_cmd = sub.add_parser("mapping", help="resolve a canonical package id")
-    mapping_cmd.add_argument("name")
+    mapping_cmd = sub.add_parser(
+        "mapping",
+        help="look up how a package maps between distros",
+        description=(
+            "Resolve a canonical package id to a distro package, or reverse-map\n"
+            "a distro package name."
+        ),
+        epilog=(
+            "Examples:\n"
+            "  lcm mapping firefox --to debian\n"
+            "  lcm mapping firefox-esr --from debian --to arch"
+        ),
+    )
+    mapping_cmd.add_argument("name", help="canonical id or distro package name")
     mapping_cmd.add_argument("--to", help="target distro id")
-    mapping_cmd.add_argument("--from", dest="source", help="source distro id for reverse lookup")
+    mapping_cmd.add_argument(
+        "--from", dest="source", help="source distro id for reverse lookup"
+    )
     _add_json(mapping_cmd)
     mapping_cmd.set_defaults(func=cmd_mapping)
 
@@ -457,6 +809,9 @@ def build_parser() -> argparse.ArgumentParser:
 def main(argv: list[str] | None = None) -> int:
     parser = build_parser()
     args = parser.parse_args(argv)
+    if not getattr(args, "command", None):
+        parser.print_help()
+        return 0
     try:
         return args.func(args)
     except LcmError as exc:

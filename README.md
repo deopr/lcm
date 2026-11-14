@@ -123,9 +123,25 @@ include overrides a default exclusion (for example
 `--include-home Downloads/taxes.pdf`):
 
 ```sh
-lcm export ~/lcm-backup.lcmb --include-home Documents --include-home Projects
-lcm export ~/lcm-full.lcmb --full-home
+lcm export -o ~/lcm-backup.lcmb --include-home Documents --include-home Projects
+lcm export --full-home -o /mnt/storage/lcm-full.lcmb
 ```
+
+`-o`/`--output` accepts a `.lcmb` file or an existing directory. The older
+positional form (`lcm export ~/lcm-backup.lcmb`) still works. If you omit the
+destination, LCM writes `<profile>-<timestamp>.lcmb` in the current directory.
+
+Staging space for the payload tars defaults to the output's filesystem, not
+`/tmp`, so a full-home export goes to the disk or NAS you chose. If the output
+is on a NAS, keep the scratch space local:
+
+```sh
+lcm export --full-home -o /mnt/nas/backups/lcm-full.lcmb --staging-dir /mnt/storage
+```
+
+The staged payload and the compressed bundle both exist at the same time, so
+budget roughly twice the selected home data and check `df -h` first. Existing
+bundles are not overwritten unless you pass `--force`.
 
 A bundle is a continuity snapshot, not a disk image. It does not clone
 `/var/lib`, package versions, third-party repositories, container images or
@@ -150,12 +166,27 @@ verdict; read the verdict line.
 ### Capture this machine
 
 ```sh
-lcm export ~/lcm-backup.lcmb               # packages + dotfiles/config allowlist
-lcm export ~/lcm-full.lcmb --full-home     # also carry personal files
-lcm export ~/lcm-backup.lcmb --include-home Projects --include-home Documents
-lcm export ~/meta.lcmb --no-payload        # metadata only
-lcm export ~/for-arch.lcmb --target arch   # preview mapping for a target
+lcm export -o ~/lcm-backup.lcmb               # packages + dotfiles/config allowlist
+lcm export --full-home -o /mnt/storage/lcm-full.lcmb  # also carry personal files
+lcm export -o /mnt/storage/lcm.lcmb --include-home Projects --include-home Documents
+lcm export --no-payload -o /tmp/meta.lcmb     # metadata only
+lcm export -o /mnt/storage/for-arch.lcmb --target arch  # preview mapping for a target
+lcm backup -o /mnt/nas/lcm.lcmb               # alias for export
 ```
+
+`--full-home` captures personal files as well. Choose a destination with
+enough room, and use `--staging-dir` when the destination is a NAS:
+
+```sh
+lcm export --full-home -o /mnt/nas/backups/lcm-full.lcmb --staging-dir /mnt/storage
+```
+
+A full-home export stages the payload next to the output by default, so it no
+longer depends on `/tmp` size. Both the staged payload and the final bundle
+exist during the export; allow roughly twice the selected data.
+
+Run `lcm` with no arguments for a short command overview, or
+`lcm export --help` / `lcm restore --help` for examples.
 
 ### Apply a bundle to the machine you are on
 

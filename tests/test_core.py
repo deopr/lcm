@@ -12,7 +12,13 @@ import unittest
 from pathlib import Path
 
 from lcm import bundle, pkgs
-from lcm.cli import _apply_home_options, _looks_like_bundle, build_parser
+from lcm.cli import (
+    _apply_home_options,
+    _export_destination,
+    _looks_like_bundle,
+    build_parser,
+    main,
+)
 from lcm.profile import DEFAULT_NEVER
 from lcm.restore import _extract, _never, _resolve
 from lcm.assess import analyze, needed_space_bytes
@@ -403,6 +409,61 @@ class TestBundle(unittest.TestCase):
             finally:
                 loaded.cleanup()
 
+    def test_staging_dir_is_used_and_cleaned(self):
+        with tempfile.TemporaryDirectory() as tmp, tempfile.TemporaryDirectory() as stage:
+            out = Path(tmp) / "staged.lcmb"
+            bundle.create(
+                out,
+                Profile(name="staged"),
+                {},
+                make_system(),
+                include_payload=False,
+                staging_dir=stage,
+            )
+            self.assertTrue(out.exists())
+            self.assertEqual(list(Path(stage).iterdir()), [])
+
+    def test_own_staging_and_output_are_excluded_from_home_payload(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            home = Path(tmp) / "home"
+            (home / "Documents").mkdir(parents=True)
+            (home / "Documents" / "note.txt").write_text("keep me", encoding="utf-8")
+            staging = home / "stage"
+            staging.mkdir()
+            profile = Profile(
+                name="own-paths",
+                users=[UserSpec(name="alice", home=str(home))],
+                config=ConfigSpec(home=["."]),
+            )
+            out = home / "backup.lcmb"
+            events = []
+            bundle.create(
+                out,
+                profile,
+                {},
+                make_system(),
+                staging_dir=staging,
+                progress=lambda label, files, size: events.append(
+                    (label, files, size)
+                ),
+            )
+            loaded = bundle.load(out)
+            try:
+                with tarfile.open(loaded.payload_home()) as archive:
+                    names = [member.name for member in archive.getmembers()]
+            finally:
+                loaded.cleanup()
+
+            self.assertIn("Documents/note.txt", names)
+            self.assertFalse(
+                any(".lcm-staging-" in name for name in names),
+                "staging directory leaked into its own payload",
+            )
+            self.assertFalse(any(name.endswith("backup.lcmb") for name in names))
+            self.assertTrue(
+                any(label == "home:alice" and files > 0 for label, files, _ in events)
+            )
+
     def test_tamper_detected(self):
         profile = Profile(name="tamper", users=[UserSpec(name="alice")])
         with tempfile.TemporaryDirectory() as tmp:
@@ -575,11 +636,82 @@ class TestRawFallback(unittest.TestCase):
         self.assertEqual(attempted, ["definitely-not-in-the-database"])
 
 
+class TestExportDestination(unittest.TestCase):
+    def test_output_option_can_be_a_file(self):
+        args = argparse.Namespace(path=None, output="/mnt/storage/lcm.lcmb")
+        out = _export_destination(args, Profile(name="host"))
+        self.assertEqual(out, Path("/mnt/storage/lcm.lcmb"))
+
+    def test_output_option_can_be_an_existing_directory(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            args = argparse.Namespace(path=None, output=tmp)
+            out = _export_destination(args, Profile(name="host"))
+            self.assertEqual(out.parent, Path(tmp))
+            self.assertTrue(out.name.startswith("host-"))
+            self.assertEqual(out.suffix, ".lcmb")
+
+    def test_positional_path_still_works(self):
+        args = argparse.Namespace(path="/mnt/storage/backup", output=None)
+        out = _export_destination(args, Profile(name="host"))
+        self.assertEqual(out, Path("/mnt/storage/backup.lcmb"))
+
+    def test_existing_suffix_is_kept(self):
+        args = argparse.Namespace(path="/mnt/storage/backup.v1", output=None)
+        out = _export_destination(args, Profile(name="host"))
+        self.assertEqual(out, Path("/mnt/storage/backup.v1.lcmb"))
+
+    def test_default_is_the_current_directory(self):
+        args = argparse.Namespace(path=None, output=None)
+        out = _export_destination(args, Profile(name="host"))
+        self.assertEqual(out.parent, Path.cwd())
+        self.assertTrue(out.name.startswith("host-"))
+
+    def test_path_and_output_are_mutually_exclusive(self):
+        args = argparse.Namespace(path="a.lcmb", output="b.lcmb")
+        with self.assertRaises(LcmError):
+            _export_destination(args, Profile(name="host"))
+
+
 class TestCliParsing(unittest.TestCase):
     def test_import_is_an_alias_for_restore(self):
         args = build_parser().parse_args(["import", "bundle.lcmb"])
         self.assertEqual(args.func.__name__, "cmd_restore")
         self.assertEqual(args.bundle, "bundle.lcmb")
+
+    def test_backup_is_an_alias_for_export(self):
+        args = build_parser().parse_args(["backup", "-o", "/mnt/storage/x.lcmb"])
+        self.assertEqual(args.func.__name__, "cmd_export")
+        self.assertEqual(args.output, "/mnt/storage/x.lcmb")
+
+    def test_export_destination_is_optional(self):
+        args = build_parser().parse_args(["export"])
+        self.assertIsNone(args.path)
+        self.assertIsNone(args.output)
+
+    def test_export_accepts_output_and_staging_options(self):
+        args = build_parser().parse_args(
+            [
+                "export",
+                "--full-home",
+                "-o",
+                "/mnt/storage/lcm.lcmb",
+                "--staging-dir",
+                "/mnt/storage",
+            ]
+        )
+        self.assertEqual(args.output, "/mnt/storage/lcm.lcmb")
+        self.assertEqual(args.staging_dir, "/mnt/storage")
+
+    def test_no_command_is_not_an_argparse_error(self):
+        args = build_parser().parse_args([])
+        self.assertIsNone(args.command)
+
+    def test_no_command_prints_help(self):
+        output = io.StringIO()
+        with contextlib.redirect_stdout(output):
+            code = main([])
+        self.assertEqual(code, 0)
+        self.assertIn("Common workflows", output.getvalue())
 
     def test_export_full_home_flags(self):
         args = build_parser().parse_args(

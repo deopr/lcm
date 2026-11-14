@@ -17,6 +17,7 @@ import tarfile
 import tempfile
 from dataclasses import dataclass
 from pathlib import Path
+from typing import Callable
 
 from lcm import __version__
 from lcm.profile import Profile
@@ -28,9 +29,13 @@ PROFILE = "profile.yaml"
 PACKAGES = "packages.json"
 CHECKSUMS = "checksums.sha256"
 
+# progress(label, files, bytes)
+Progress = Callable[[str, int, int], None]
+
 BUILTIN_EXCLUDES = {
     ".cache",
     ".lcm-backup",
+    ".lcm-staging-*",
     "Cache",
     "cache",
     "CachedData",
@@ -120,34 +125,40 @@ def _make_filter(patterns: list[str]):
     return _filter
 
 
+@dataclass
+class _CaptureStats:
+    files: int = 0
+    bytes: int = 0
+
+
 def _add_member(
     archive: tarfile.TarFile,
     path: Path,
     arcname: str,
     member_filter,
-) -> bool:
+) -> tarfile.TarInfo | None:
     try:
         info = archive.gettarinfo(str(path), arcname)
     except OSError:
-        return False
+        return None
     if info is None:
-        return False
+        return None
     if member_filter is not None and member_filter(info) is None:
-        return False
+        return None
     if info.isreg():
         try:
             handle = open(path, "rb")
         except OSError:
             # Unreadable file (for example a root-only secret while exporting
             # unprivileged): skip it instead of aborting the whole bundle.
-            return False
+            return None
         try:
             archive.addfile(info, handle)
         finally:
             handle.close()
     else:
         archive.addfile(info)
-    return True
+    return info
 
 
 def _walk_into(
@@ -155,9 +166,17 @@ def _walk_into(
     path: Path,
     arcname: str,
     member_filter,
+    stats: _CaptureStats,
+    progress: Progress | None,
 ) -> None:
-    if not _add_member(archive, path, arcname, member_filter):
+    info = _add_member(archive, path, arcname, member_filter)
+    if info is None:
         return
+    stats.files += 1
+    if info.isreg():
+        stats.bytes += max(info.size, 0)
+    if progress is not None:
+        progress(arcname, stats.files, stats.bytes)
     if path.is_symlink() or not path.is_dir():
         return
     try:
@@ -165,7 +184,14 @@ def _walk_into(
     except OSError:
         return
     for child in children:
-        _walk_into(archive, child, f"{arcname}/{child.name}", member_filter)
+        _walk_into(
+            archive,
+            child,
+            f"{arcname}/{child.name}",
+            member_filter,
+            stats,
+            progress,
+        )
 
 
 def _tar_tree(
@@ -173,9 +199,11 @@ def _tar_tree(
     patterns: list[str],
     excludes: list[str],
     out: Path,
+    progress: Progress | None = None,
 ) -> None:
     out.parent.mkdir(parents=True, exist_ok=True)
     member_filter = _make_filter(excludes + sorted(BUILTIN_EXCLUDES))
+    stats = _CaptureStats()
     with tarfile.open(out, "w") as archive:
         for pattern in patterns:
             candidate = source_root / pattern
@@ -192,9 +220,18 @@ def _tar_tree(
                         child,
                         str(Path(pattern) / child.name),
                         member_filter,
+                        stats,
+                        progress,
                     )
             else:
-                _walk_into(archive, candidate, pattern, member_filter)
+                _walk_into(
+                    archive,
+                    candidate,
+                    pattern,
+                    member_filter,
+                    stats,
+                    progress,
+                )
 
 
 def _checksums(root: Path) -> str:
@@ -207,6 +244,20 @@ def _checksums(root: Path) -> str:
     return "\n".join(lines) + "\n"
 
 
+def _skip_patterns(root: Path, paths: set[Path]) -> list[str]:
+    """Exclude our own staging/output paths when they sit inside a capture root."""
+    root_abs = Path(os.path.abspath(root))
+    patterns: list[str] = []
+    for path in paths:
+        try:
+            relative = Path(os.path.abspath(path)).relative_to(root_abs)
+        except ValueError:
+            continue
+        if relative.parts:
+            patterns.append(relative.as_posix())
+    return patterns
+
+
 def create(
     out_path: str | Path,
     profile: Profile,
@@ -214,14 +265,38 @@ def create(
     system,
     *,
     include_payload: bool = True,
+    staging_dir: str | Path | None = None,
+    progress: Progress | None = None,
 ) -> Path:
-    """Build a `.lcmb` from a profile and captured state."""
-    out_path = Path(out_path)
-    if out_path.suffix != ".lcmb":
-        out_path = out_path.with_suffix(".lcmb")
+    """Build a `.lcmb` from a profile and captured state.
 
-    staging = Path(tempfile.mkdtemp(prefix="lcm-bundle-"))
+    Payload tars are staged next to the output by default, so a large export
+    goes to the disk or NAS the user chose instead of a small `/tmp` tmpfs.
+    `staging_dir` moves only the scratch space, not the final bundle.
+    """
+    out_path = Path(out_path).expanduser()
+    if out_path.suffix.lower() != ".lcmb":
+        out_path = out_path.with_name(out_path.name + ".lcmb")
+    out_path = Path(os.path.abspath(out_path))
+    staging_parent = (
+        Path(os.path.abspath(Path(staging_dir).expanduser()))
+        if staging_dir
+        else out_path.parent
+    )
+    partial = out_path.with_name(out_path.name + ".partial")
+    staging: Path | None = None
+
+    def report(label: str) -> Progress | None:
+        if progress is None:
+            return None
+        return lambda _arcname, files, size: progress(label, files, size)
+
     try:
+        out_path.parent.mkdir(parents=True, exist_ok=True)
+        staging_parent.mkdir(parents=True, exist_ok=True)
+        staging = Path(
+            tempfile.mkdtemp(prefix=".lcm-staging-", dir=staging_parent)
+        )
         (staging / "payload").mkdir(parents=True, exist_ok=True)
         (staging / "hardware").mkdir(parents=True, exist_ok=True)
 
@@ -271,36 +346,56 @@ def create(
         if include_payload:
             home = Path(profile.users[0].home) if profile.users and profile.users[0].home else Path.home()
             etc = Path("/etc")
+            own_paths = {out_path, partial, staging}
             for user in profile.users:
                 user_home = Path(user.home) if user.home else home
                 tar_path = staging / "payload" / f"home-{user.name}.tar"
                 _tar_tree(
                     user_home,
                     profile.config.home,
-                    profile.config.never,
+                    [
+                        *profile.config.never,
+                        *_skip_patterns(user_home, own_paths),
+                    ],
                     tar_path,
+                    progress=report(f"home:{user.name}"),
                 )
-            _tar_tree(etc, profile.config.etc, [], staging / "payload" / "etc.tar")
+            _tar_tree(
+                etc,
+                profile.config.etc,
+                _skip_patterns(etc, own_paths),
+                staging / "payload" / "etc.tar",
+                progress=report("etc"),
+            )
 
         (staging / CHECKSUMS).write_text(_checksums(staging), encoding="utf-8")
 
-        out_path.parent.mkdir(parents=True, exist_ok=True)
-        temporary_name = out_path.with_name(out_path.name + ".partial")
-        with tarfile.open(temporary_name, "w:gz", compresslevel=6) as archive:
+        with tarfile.open(partial, "w:gz", compresslevel=6) as archive:
             for path in sorted(staging.rglob("*")):
                 archive.add(
                     path,
                     arcname=path.relative_to(staging).as_posix(),
                     recursive=False,
                 )
-        os.replace(temporary_name, out_path)
+        os.replace(partial, out_path)
         try:
             os.chmod(out_path, 0o600)
         except OSError:
             pass
         return out_path
+    except OSError as exc:
+        raise LcmError(
+            f"could not create bundle at {out_path}: {exc}\n"
+            f"staging directory: {staging or staging_parent}\n"
+            "check free space and write permissions"
+        ) from exc
     finally:
-        shutil.rmtree(staging, ignore_errors=True)
+        if staging is not None:
+            shutil.rmtree(staging, ignore_errors=True)
+        try:
+            partial.unlink()
+        except FileNotFoundError:
+            pass
 
 
 # --------------------------------------------------------------------------
