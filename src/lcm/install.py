@@ -1717,7 +1717,7 @@ def commit(
     *,
     assume_yes: bool = False,
     keep_old: bool = False,
-    keep_backup: bool = False,
+    prune_backup: bool = False,
     force: bool = False,
 ) -> None:
     require_root("lcm commit")
@@ -1753,7 +1753,7 @@ def commit(
                 f"old subvolume {journal.data.get('old_subvol')}"
             )
         backup_name = str(journal.data.get("backup_subvol") or "")
-        if not keep_backup and backup_name:
+        if prune_backup and backup_name:
             actions.append(f"pre-replace snapshot {backup_name}")
         old_entry = journal.data.get("old_boot_entry")
         if old_entry:
@@ -1777,7 +1777,7 @@ def commit(
             old = POOL_MOUNT / str(journal.data.get("old_subvol") or "@")
             if old.exists():
                 run(["btrfs", "subvolume", "delete", str(old)])
-        if not keep_backup:
+        if prune_backup:
             backup_name = str(journal.data.get("backup_subvol") or "")
             backup = POOL_MOUNT / backup_name if backup_name else None
             if backup is not None and backup.exists():
@@ -1799,16 +1799,16 @@ def commit(
         "committed",
         commit_time=utc_now(),
         kept_old=keep_old,
-        kept_backup=keep_backup,
+        pruned_backup=prune_backup,
     )
     if keep_old:
         print("Committed; old subvolume kept.")
     else:
         print("Committed. The old root subvolume is gone.")
-    if keep_backup:
-        backup_name = journal.data.get("backup_subvol")
-        if backup_name:
-            print(f"Pre-replace snapshot kept: {backup_name}")
+    backup_name = journal.data.get("backup_subvol")
+    if backup_name and not prune_backup:
+        print(f"Pre-replace snapshot kept: {backup_name}")
+        print("Delete it with `sudo btrfs subvolume delete` when no longer needed.")
 
 
 def rollback(*, entry: str | None = None) -> None:

@@ -481,7 +481,7 @@ def cmd_commit(args: argparse.Namespace) -> int:
     install.commit(
         assume_yes=args.yes,
         keep_old=args.keep_old,
-        keep_backup=args.keep_backup,
+        prune_backup=args.prune,
         force=args.force,
     )
     return 0
@@ -818,7 +818,8 @@ def build_parser() -> argparse.ArgumentParser:
         "commit",
         help="delete the old system after the new one validates",
         description=(
-            "Remove the old subvolume, firmware entry, and pre-replace snapshot.\n"
+            "Remove the old subvolume and firmware entry. The pre-replace\n"
+            "@lcm-backup-* snapshot is kept unless --prune is passed.\n"
             "Run this from the new system after first-boot validation has passed."
         ),
     )
@@ -829,9 +830,9 @@ def build_parser() -> argparse.ArgumentParser:
         "--keep-old", action="store_true", help="keep the old subvolume"
     )
     commit.add_argument(
-        "--keep-backup",
+        "--prune",
         action="store_true",
-        help="keep the read-only pre-replace btrfs snapshot",
+        help="also delete the pre-replace @lcm-backup-* snapshot (kept by default)",
     )
     commit.add_argument(
         "--force", action="store_true", help="ignore failed validation"

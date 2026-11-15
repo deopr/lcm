@@ -95,8 +95,9 @@ Safety properties:
 - bundles are written with mode `0600` (they can contain SSH keys),
 - the outer bundle contains no links; extraction refuses absolute member
   paths, `..` member paths, device nodes, and FIFOs,
-- payload symlinks are preserved when they stay inside the restored tree;
-  absolute links and relative links that escape it are skipped with a note,
+- payload symlinks are preserved when they resolve inside the restored tree;
+  absolute links and links that escape through earlier links are skipped with
+  a note,
 - every file is checksummed and verified before use,
 - unreadable source files are skipped rather than aborting the export,
 - `--full-home` can include browser profiles, SSH/GPG keys, and other
@@ -295,7 +296,10 @@ What happens:
    **unified kernel image** are created,
 7. a separate firmware entry `LCM <target>` is registered; the old entry stays
    first in BootOrder, and a one-shot `BootNext` makes the firmware try the new
-   entry exactly once, falling back to the old system if it fails,
+   entry exactly once, falling back to the old system if it fails. `BootNext`
+   is consumed by that boot: if the new system works, run `commit` before the
+   next reboot to make its entry first, otherwise firmware returns to the old
+   entry,
 8. Fedora targets get `/.autorelabel` so SELinux relabels the new root on first
    boot (this may reboot once).
 
@@ -304,9 +308,9 @@ Then:
 ```sh
 # reboot; BootNext tries "LCM <target>" once, or pick it with F12
 sudo lcm validate                 # runs the same checks as first boot
-sudo lcm commit                   # deletes old root, boot entry, and snapshot
+sudo lcm commit                   # deletes old root and boot entry
+sudo lcm commit --prune           # also delete the @lcm-backup-* snapshot
 sudo lcm commit --keep-old        # keep the old root subvolume
-sudo lcm commit --keep-backup     # keep the @lcm-backup-* snapshot too
 sudo lcm rollback                 # make the old entry default again
 sudo lcm recover                  # inspect / clean up unfinished attempts
 sudo lcm journal list
@@ -385,9 +389,9 @@ links that escape the tree.
 - `replace` never modifies the running root; it snapshots it read-only first.
 - The old firmware entry remains first in `BootOrder` until `commit`; the new
   entry is tried once through `BootNext`.
-- `commit` deletes only after validation (`--force` exists, but says why) and
-  removes the pre-replace `@lcm-backup-*` snapshot unless `--keep-backup` is
-  passed; `--keep-old` retains the old root subvolume.
+- `commit` deletes only after validation (`--force` exists, but says why).
+  The pre-replace `@lcm-backup-*` snapshot is kept by default; `--prune`
+  deletes it explicitly, and `--keep-old` retains the old root subvolume.
 - `/home` is reused and only written additively, with per-file backups.
 - Partition table and `efibootmgr` output are recorded in the journal.
 - No profile or bundle can execute code.

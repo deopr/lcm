@@ -113,23 +113,64 @@ def _lexical_path(root: Path, name: str) -> Path:
     return parent / relative.name
 
 
-def _validate_symlink(member_name: str, link: str, dest_root: Path) -> None:
-    """Allow relative links that stay inside the restore root.
+def _resolves_inside(path: str | Path, root: Path) -> bool:
+    """Resolve links against the real filesystem, not just path strings."""
+    base = Path(os.path.realpath(root))
+    resolved = Path(os.path.realpath(path))
+    return resolved == base or base in resolved.parents
 
-    Absolute links and relative links that climb out of the root are refused.
-    A link such as ``../.config/real.conf`` is safe when its normalized target
-    remains under the destination, and preserving it matters for systemd user
-    units and similar dotfile layouts.
+
+def _validate_symlink(
+    dest: Path, member_name: str, link: str, dest_root: Path
+) -> None:
+    """Allow relative links that resolve inside the restore root.
+
+    Absolute links are refused.  Relative links are resolved with
+    ``os.path.realpath`` so an earlier symlink cannot redirect a later target
+    outside the destination.  A link such as ``../.config/real.conf`` is kept
+    when its real target stays under the destination, which matters for
+    systemd user units and similar dotfile layouts.
     """
     if not link or link.startswith("/") or link.startswith("\\"):
         raise LcmError(f"unsafe symlink target: {member_name} -> {link}")
-    parent = Path(member_name).parent
-    relative = os.path.normpath(os.path.join(str(parent), link))
-    if relative == ".." or relative.startswith("../") or Path(relative).is_absolute():
+    target = os.path.join(os.path.dirname(dest), link)
+    if not _resolves_inside(target, dest_root):
         raise LcmError(f"unsafe symlink target: {member_name} -> {link}")
-    # Follow any existing components to make sure an earlier link cannot
-    # redirect this target outside the destination root.
-    safe_join(dest_root, relative)
+
+
+def _validate_created_symlink(
+    dest: Path, member_name: str, link: str, dest_root: Path
+) -> None:
+    """Re-check a link after creation and remove it if it already escapes."""
+    if _resolves_inside(dest, dest_root):
+        return
+    try:
+        dest.unlink()
+    except OSError:
+        pass
+    raise LcmError(f"unsafe symlink target: {member_name} -> {link}")
+
+
+def _remove_escaping_symlinks(dest_root: Path) -> list[str]:
+    """Remove links that only began escaping after a later member was added.
+
+    A link such as ``e -> d/up/..`` can look safe until a later member creates
+    ``d/up -> ..``.  Resolving every link again after extraction closes that
+    ordering-dependent hole.
+    """
+    root = Path(os.path.realpath(dest_root))
+    removed: list[str] = []
+    for dirpath, dirnames, filenames in os.walk(root, followlinks=False):
+        for name in list(dirnames) + filenames:
+            path = Path(dirpath) / name
+            if not path.is_symlink() or _resolves_inside(path, root):
+                continue
+            try:
+                path.unlink()
+            except OSError:
+                continue
+            removed.append(str(path.relative_to(root)))
+    return removed
 
 
 def _remove_for_member(dest: Path, member: tarfile.TarInfo) -> None:
@@ -151,12 +192,13 @@ def _extract_member(
 
     if member.issym():
         link = member.linkname or ""
-        _validate_symlink(member.name, link, dest_root)
+        _validate_symlink(dest, member.name, link, dest_root)
         if dest.exists() or dest.is_symlink():
             _backup_file(dest, backup_root, member.name)
             _remove_for_member(dest, member)
         dest.parent.mkdir(parents=True, exist_ok=True)
         os.symlink(link, dest)
+        _validate_created_symlink(dest, member.name, link, dest_root)
         if owner is not None:
             try:
                 os.lchown(dest, owner[0], owner[1])
@@ -221,6 +263,9 @@ def _extract(
                 notes.append(f"skipped {member.name}: {exc}")
                 continue
             count += 1
+    if apply:
+        for name in _remove_escaping_symlinks(dest_root):
+            notes.append(f"removed escaping symlink after extraction: {name}")
     return count, notes
 
 

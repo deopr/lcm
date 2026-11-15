@@ -983,9 +983,10 @@ class TestCliParsing(unittest.TestCase):
         )
         self.assertEqual(args.work_dir, "/mnt/scratch")
 
-    def test_commit_keep_backup_option(self):
-        args = build_parser().parse_args(["commit", "--keep-backup"])
-        self.assertTrue(args.keep_backup)
+    def test_commit_prune_option(self):
+        args = build_parser().parse_args(["commit", "--prune"])
+        self.assertTrue(args.prune)
+        self.assertFalse(build_parser().parse_args(["commit"]).prune)
 
 
 class TestRestoreFormatDetection(unittest.TestCase):
@@ -1138,6 +1139,50 @@ class TestRestoreExtraction(unittest.TestCase):
             self.assertFalse((home / ".config/escape").is_symlink())
             self.assertEqual(count, 1)
             self.assertTrue(any("unsafe symlink" in note for note in notes))
+
+    def test_chained_symlink_escape_is_skipped(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            tar_path = root / "payload.tar"
+            self._tar(
+                tar_path,
+                [
+                    ("d", "dir", ""),
+                    ("d/up", "symlink", ".."),
+                    ("e", "symlink", "d/up/.."),
+                ],
+            )
+            home = root / "home"
+            home.mkdir()
+            count, notes = _extract(
+                tar_path, home, root / "backup", [], apply=True
+            )
+            self.assertTrue((home / "d/up").is_symlink())
+            self.assertFalse((home / "e").is_symlink())
+            self.assertEqual(count, 2)
+            self.assertTrue(any("unsafe symlink" in note for note in notes))
+
+    def test_later_link_cannot_turn_an_earlier_link_into_an_escape(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            tar_path = root / "payload.tar"
+            self._tar(
+                tar_path,
+                [
+                    ("d", "dir", ""),
+                    ("e", "symlink", "d/up/.."),
+                    ("d/up", "symlink", ".."),
+                ],
+            )
+            home = root / "home"
+            home.mkdir()
+            _count, notes = _extract(
+                tar_path, home, root / "backup", [], apply=True
+            )
+            self.assertFalse((home / "e").is_symlink())
+            self.assertTrue(
+                any("removed escaping symlink" in note for note in notes)
+            )
 
     def test_excluded_paths_are_not_extracted(self):
         with tempfile.TemporaryDirectory() as tmp:
