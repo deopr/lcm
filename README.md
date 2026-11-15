@@ -320,6 +320,10 @@ Journal states: `planned → prepared → bootstrapped → configured → armed 
 validated → committed`, plus `rolled_back` and `failed`. The journal is copied
 to the ESP so it survives a broken root.
 
+For a real hardware run, use [`docs/replace-test-record.md`](docs/replace-test-record.md).
+It lists the exact `efibootmgr`, journal, first-boot and `commit` evidence to
+capture so the result can be added to a “tested on” section without guessing.
+
 ## Testing on a fresh Debian VM
 
 The acceptance path for `export` → `restore` is a Debian VM with no prior
@@ -368,20 +372,23 @@ sudo lcm restore /path/to/lcm-backup.lcmb --apply --yes --try-raw
 
 Run `lcm` through `sudo` from the account that should receive the dotfiles. A
 single human account is mapped automatically; running as root with no normal
-account causes LCM to create the bundle's user instead. `--try-raw` is useful
-for a Fedora-to-Arch test because it attempts source names that have no
-canonical mapping and reports the ones Arch does not carry.
+account causes LCM to create the bundle's user instead.
+
+Fedora and Arch names that are identical are mapped automatically from the
+`same_name` list in `mappings.yaml`. In the current Fedora test capture this
+raised Arch coverage from about 15% to about 64%. `--try-raw` remains useful
+for the rest: it attempts source names that have no canonical mapping and
+reports the ones Arch does not carry.
 
 `--strict` makes CI fail on any missing package name; a cross-distro bundle
 normally contains a few names the target calls differently. The `restore` path
 has been exercised on clean Debian 13 and Debian 12 containers. Debian 13
 installed the full example set; Debian 12 installed all but three newer tools
 (`eza`, `fastfetch`, `starship`) and reported them without aborting. Bundle
-restores on both releases exercised user-home mapping and dotfiles, including
-kept relative symlinks and skipped absolute symlinks (and Python 3.11's older
-tarfile API on Debian 12). Restores keep relative symlinks that stay inside
-the home directory, including links that use `..`, and skip absolute links or
-links that escape the tree.
+restores exercised user-home mapping and dotfiles, including Python 3.11's
+older tarfile API on Debian 12. Relative symlinks that resolve inside the home
+directory are kept, including links that use `..`; absolute links and links
+that escape the tree are skipped with a note.
 
 ## Safety invariants
 
@@ -427,9 +434,11 @@ packages:
   example-app: {fedora: example-app, debian: example-app, arch: example-app, flatpak: org.example.ExampleApp}
 ```
 
-The mapping is deliberately conservative: HTTPS-first, with no silent name
-guessing across families. Unmatched names are preserved as raw entries in the
-bundle so nothing is lost.
+The mapping is deliberately conservative and does not guess names across
+families. The `same_name` section lists names that were checked to be identical
+in Fedora and Arch; those become normal mappings at load time. Existing curated
+entries are never overwritten, so a deliberate Flatpak fallback wins. Unmatched
+names are preserved as raw entries in the bundle so nothing is lost.
 
 ## Contributing
 

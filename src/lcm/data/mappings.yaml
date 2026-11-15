@@ -7,7 +7,7 @@
 # exists in your particular release.  `lcm check` reports what it cannot
 # map; it does not silently guess.
 version: 1
-updated: "2026-11-13"
+updated: "2026-11-15"
 
 packages:
   firefox: {fedora: firefox, debian: firefox-esr, ubuntu: firefox, arch: firefox, suse: MozillaFirefox, flatpak: org.mozilla.firefox, note: {debian: "Debian ships Firefox ESR as firefox-esr", ubuntu: "Ubuntu ships the snap-backed firefox package"}}
@@ -168,3 +168,206 @@ packages:
   zerotier: {fedora: zerotier-one, debian: zerotier-one, arch: zerotier-one, suse: zerotier-one}
   virtualbox: {fedora: VirtualBox, debian: virtualbox, arch: virtualbox, suse: virtualbox}
   gnome-boxes: {fedora: gnome-boxes, debian: gnome-boxes, arch: gnome-boxes, suse: gnome-boxes}
+
+# Exact package names shared by Fedora and Arch.  These were checked
+# against the Arch core/extra databases and a captured Fedora package
+# list; a name is only listed here when both repositories use it verbatim.
+# Existing curated entries are never overwritten.  Debian and openSUSE
+# stay unknown unless they get an explicit mapping.
+same_name:
+  fedora-arch:
+    - android-tools
+    - ark
+    - atril
+    - aubio
+    - audiocd-kio
+    - aurorae
+    - awww
+    - bc
+    - binwalk
+    - bison
+    - bluedevil
+    - blueman
+    - bluez-cups
+    - brltty
+    - btrfs-progs
+    - catfish
+    - cava
+    - claws-mail
+    - cliphist
+    - cmatrix
+    - colord
+    - compsize
+    - cpio
+    - cups-browsed
+    - cups-pk-helper
+    - diffstat
+    - direnv
+    - dnf5
+    - dnsmasq
+    - dos2unix
+    - dosfstools
+    - doxygen
+    - dragon
+    - dunst
+    - ed
+    - ethtool
+    - exfatprogs
+    - extra-cmake-modules
+    - ffmpegthumbs
+    - filelight
+    - filesystem
+    - firewall-config
+    - flatpak-kcm
+    - flex
+    - fuzzel
+    - fwupd
+    - galculator
+    - gammastep
+    - geany
+    - gettext
+    - ghostscript
+    - glslang
+    - goverlay
+    - gpm
+    - gradle
+    - grim
+    - gutenprint
+    - gvfs
+    - gvfs-mtp
+    - gwenview
+    - hunspell
+    - hyprland
+    - hyprland-guiutils
+    - ibus-anthy
+    - ibus-chewing
+    - ibus-hangul
+    - ibus-libpinyin
+    - ibus-typing-booster
+    - iptstate
+    - irqbalance
+    - isomd5sum
+    - kaccounts-providers
+    - kamera
+    - kamoso
+    - kate
+    - kde-gtk-config
+    - kde-inotify-survey
+    - kdebugsettings
+    - kdegraphics-thumbnailers
+    - kdenetwork-filesharing
+    - kdeplasma-addons
+    - kdialog
+    - kdnssd
+    - keditbookmarks
+    - khelpcenter
+    - kinfocenter
+    - kio-admin
+    - kio-gdrive
+    - kjournald
+    - kmenuedit
+    - kmouth
+    - konsole
+    - krdp
+    - kscreen
+    - kscreenlocker
+    - ksshaskpass
+    - kunifiedpush
+    - kvantum
+    - kwin
+    - lact
+    - links
+    - loupe
+    - lrzsz
+    - lsof
+    - lua
+    - mailcap
+    - man-pages
+    - mangowm
+    - matugen
+    - mdadm
+    - mediawriter
+    - micro
+    - minicom
+    - mousepad
+    - mpv-mpris
+    - mtr
+    - nautilus
+    - neochat
+    - network-manager-applet
+    - nm-connection-editor
+    - nss-mdns
+    - ntfs-3g
+    - ntfsprogs
+    - nvme-cli
+    - nwg-displays
+    - nwg-look
+    - opensc
+    - orca
+    - pamixer
+    - parallel
+    - parole
+    - parted
+    - patch
+    - patchutils
+    - picocom
+    - plocate
+    - plymouth
+    - ppp
+    - pragha
+    - prismlauncher
+    - qalculate-gtk
+    - qemu-guest-agent
+    - qrca
+    - qt6ct
+    - quickshell
+    - ristretto
+    - satty
+    - scrcpy
+    - sddm
+    - seahorse
+    - shader-slang
+    - signon-kwallet-extension
+    - skanpage
+    - spectacle
+    - speech-dispatcher
+    - spice-vdagent
+    - squashfs-tools
+    - stress-ng
+    - subversion
+    - swappy
+    - swaybg
+    - swayidle
+    - symlinks
+    - systemtap
+    - thermald
+    - thunar-archive-plugin
+    - thunar-media-tags-plugin
+    - thunar-volman
+    - tigervnc
+    - time
+    - tldr
+    - toolbox
+    - trash-cli
+    - tumbler
+    - udiskie
+    - udisks2
+    - udisks2-btrfs
+    - usb_modeswitch
+    - usbutils
+    - uwsm
+    - v4l-utils
+    - vlc-plugin-gstreamer
+    - waybar
+    - wf-recorder
+    - whois
+    - words
+    - wpa_supplicant
+    - xarchiver
+    - xdg-user-dirs-gtk
+    - xfburn
+    - xwayland-satellite
+    - yazi
+    - ydotool
+    - zsh-autosuggestions
+    - zsh-syntax-highlighting

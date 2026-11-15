@@ -52,6 +52,23 @@ class Database:
         self.packages: dict[str, dict] = raw.get("packages") or {}
         self.updated = str(raw.get("updated", ""))
 
+        # Lists of package names that are identical in two families.  Each
+        # name becomes a normal canonical entry, but only when it does not
+        # already have a curated mapping (which may deliberately choose a
+        # Flatpak or a different native name).
+        self.same_name: dict[str, list[str]] = {}
+        for pair, names in (raw.get("same_name") or {}).items():
+            if not isinstance(pair, str) or "-" not in pair:
+                continue
+            if not isinstance(names, list):
+                continue
+            source, _, target = pair.partition("-")
+            for name in names:
+                if not isinstance(name, str) or not name or name in self.packages:
+                    continue
+                self.packages[name] = {source: name, target: name}
+                self.same_name.setdefault(pair, []).append(name)
+
         self._reverse: dict[tuple[str, str], str] = {}
         for canonical, entry in self.packages.items():
             if not isinstance(entry, dict):

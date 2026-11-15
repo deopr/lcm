@@ -6,4 +6,4 @@ The design rule of this project: state is described as data, never as
 executable code.  No bundle is allowed to run arbitrary commands.
 """
 
-__version__ = "0.1.0a4"
+__version__ = "0.1.0a5"

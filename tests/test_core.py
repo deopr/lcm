@@ -388,6 +388,24 @@ class TestMapping(unittest.TestCase):
         self.assertEqual(same.native, "some-local-pkg")
         self.assertEqual(same.confidence, "same-family")
 
+    def test_same_name_fedora_arch_packages(self):
+        result = self.db.resolve_raw(
+            "btrfs-progs",
+            "fedora",
+            "arch",
+            source_distro="fedora",
+            target_distro="arch",
+        )
+        self.assertEqual(result.native, "btrfs-progs")
+        self.assertEqual(result.confidence, "exact")
+        debian = self.db.resolve_raw("btrfs-progs", "fedora", "debian")
+        self.assertFalse(debian.installable)
+
+    def test_same_name_list_does_not_override_curated_flatpak(self):
+        result = self.db.resolve("discord", "arch")
+        self.assertIsNone(result.native)
+        self.assertEqual(result.flatpak, "com.discordapp.Discord")
+
     def test_stats(self):
         stats = MappingStats()
         stats.add(self.db.resolve("firefox", "arch"))
