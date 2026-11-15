@@ -1184,6 +1184,23 @@ class TestRestoreExtraction(unittest.TestCase):
                 any("removed escaping symlink" in note for note in notes)
             )
 
+    def test_final_check_leaves_preexisting_outside_symlinks_alone(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            home = root / "home"
+            outside = root / "outside"
+            home.mkdir()
+            outside.mkdir()
+            existing = home / "existing"
+            existing.symlink_to(outside, target_is_directory=True)
+            tar_path = root / "payload.tar"
+            self._tar(tar_path, [("note.txt", "file", "keep me\n")])
+            _count, notes = _extract(
+                tar_path, home, root / "backup", [], apply=True
+            )
+            self.assertTrue(existing.is_symlink())
+            self.assertEqual(notes, [])
+
     def test_excluded_paths_are_not_extracted(self):
         with tempfile.TemporaryDirectory() as tmp:
             root = Path(tmp)

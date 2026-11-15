@@ -151,25 +151,24 @@ def _validate_created_symlink(
     raise LcmError(f"unsafe symlink target: {member_name} -> {link}")
 
 
-def _remove_escaping_symlinks(dest_root: Path) -> list[str]:
-    """Remove links that only began escaping after a later member was added.
+def _remove_escaping_symlinks(dest_root: Path, links: list[Path]) -> list[str]:
+    """Re-check links created by this extraction, and only those.
 
     A link such as ``e -> d/up/..`` can look safe until a later member creates
-    ``d/up -> ..``.  Resolving every link again after extraction closes that
-    ordering-dependent hole.
+    ``d/up -> ..``.  Re-resolving the extracted links after the last member
+    closes that ordering hole.  Pre-existing symlinks in the user's home or in
+    /etc are deliberately left alone.
     """
     root = Path(os.path.realpath(dest_root))
     removed: list[str] = []
-    for dirpath, dirnames, filenames in os.walk(root, followlinks=False):
-        for name in list(dirnames) + filenames:
-            path = Path(dirpath) / name
-            if not path.is_symlink() or _resolves_inside(path, root):
-                continue
-            try:
-                path.unlink()
-            except OSError:
-                continue
-            removed.append(str(path.relative_to(root)))
+    for path in links:
+        if not path.is_symlink() or _resolves_inside(path, root):
+            continue
+        try:
+            path.unlink()
+        except OSError:
+            continue
+        removed.append(str(path.relative_to(root)))
     return removed
 
 
@@ -187,7 +186,8 @@ def _extract_member(
     dest_root: Path,
     backup_root: Path,
     owner: tuple[int, int] | None,
-) -> None:
+) -> Path | None:
+    """Extract one member and return a symlink path when one was created."""
     dest = _lexical_path(dest_root, member.name)
 
     if member.issym():
@@ -204,7 +204,7 @@ def _extract_member(
                 os.lchown(dest, owner[0], owner[1])
             except OSError:
                 pass
-        return
+        return dest
 
     if member.islnk():
         link = member.linkname or ""
@@ -234,6 +234,7 @@ def _extract_member(
             os.chown(dest, owner[0], owner[1], follow_symlinks=False)
         except OSError:
             pass
+    return None
 
 
 def _extract(
@@ -247,6 +248,7 @@ def _extract(
 ) -> tuple[int, list[str]]:
     count = 0
     notes: list[str] = []
+    created_links: list[Path] = []
     with tarfile.open(tar_path, "r:*") as archive:
         for member in archive.getmembers():
             if member.isdev() or member.isfifo():
@@ -258,13 +260,17 @@ def _extract(
                 count += 1
                 continue
             try:
-                _extract_member(archive, member, dest_root, backup_root, owner)
+                created = _extract_member(
+                    archive, member, dest_root, backup_root, owner
+                )
             except LcmError as exc:
                 notes.append(f"skipped {member.name}: {exc}")
                 continue
+            if created is not None:
+                created_links.append(created)
             count += 1
     if apply:
-        for name in _remove_escaping_symlinks(dest_root):
+        for name in _remove_escaping_symlinks(dest_root, created_links):
             notes.append(f"removed escaping symlink after extraction: {name}")
     return count, notes
 
