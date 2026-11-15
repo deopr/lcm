@@ -93,8 +93,10 @@ to `.lcm`; it detects the format by content.
 Safety properties:
 
 - bundles are written with mode `0600` (they can contain SSH keys),
-- extraction refuses absolute paths, `..`, device nodes, FIFOs, and top-level
-  links; absolute symlinks inside a payload are skipped with a note,
+- the outer bundle contains no links; extraction refuses absolute member
+  paths, `..` member paths, device nodes, and FIFOs,
+- payload symlinks are preserved when they stay inside the restored tree;
+  absolute links and relative links that escape it are skipped with a note,
 - every file is checksummed and verified before use,
 - unreadable source files are skipped rather than aborting the export,
 - `--full-home` can include browser profiles, SSH/GPG keys, and other
@@ -127,9 +129,10 @@ Safety properties:
 
 `--full-home` becomes an allowlist of `.` and skips common junk directories:
 `.cache`, `.local/share/Trash`, `.local/share/Steam`, `.local/share/lutris`,
-`Downloads`, `Games`, `.lcm-backup`, and common browser/Electron cache
-directories. Add specific paths with repeatable `--include-home`; an explicit
-include overrides a default exclusion (for example,
+`Downloads`, `Games`, `.lcm-backup`, and cache directories inside known
+browser and editor trees. A project directory named `cache` or `Cache` is
+**not** dropped. Add specific paths with repeatable `--include-home`; an
+explicit include overrides a default exclusion (for example,
 `--include-home Downloads/taxes.pdf`):
 
 ```sh
@@ -235,6 +238,17 @@ sudo lcm import  ~/lcm-backup.lcmb --apply --yes # same as restore
 sudo lcm import  ~/lcm-backup.lcmb --apply --yes --try-raw
 ```
 
+Before restoring, the bundle is unpacked to a workspace. LCM chooses a
+directory with enough free space and prefers `$TMPDIR`, `/var/tmp`, or the
+bundle's own filesystem over `/tmp`, because `/tmp` is RAM-backed on many
+systems. The dry run unpacks the payload too, so it needs the same workspace.
+Override the choice when the default candidates are too small:
+
+```sh
+lcm restore /mnt/storage/lcm-full.lcmb --work-dir /mnt/storage/lcm-work
+TMPDIR=/mnt/storage/lcm-work lcm restore /mnt/storage/lcm-full.lcmb
+```
+
 `--try-raw` is an opt-in best effort for packages that had no canonical
 mapping: it tries the source package name unchanged on the target. This helps
 when both distros use the same name; names the target does not carry are
@@ -290,8 +304,9 @@ Then:
 ```sh
 # reboot; BootNext tries "LCM <target>" once, or pick it with F12
 sudo lcm validate                 # runs the same checks as first boot
-sudo lcm commit                   # deletes the old subvolume + old boot entry
-sudo lcm commit --keep-old        # or keep it around
+sudo lcm commit                   # deletes old root, boot entry, and snapshot
+sudo lcm commit --keep-old        # keep the old root subvolume
+sudo lcm commit --keep-backup     # keep the @lcm-backup-* snapshot too
 sudo lcm rollback                 # make the old entry default again
 sudo lcm recover                  # inspect / clean up unfinished attempts
 sudo lcm journal list
@@ -360,7 +375,9 @@ installed the full example set; Debian 12 installed all but three newer tools
 (`eza`, `fastfetch`, `starship`) and reported them without aborting. Bundle
 restores on both releases exercised user-home mapping and dotfiles, including
 kept relative symlinks and skipped absolute symlinks (and Python 3.11's older
-tarfile API on Debian 12).
+tarfile API on Debian 12). Restores keep relative symlinks that stay inside
+the home directory, including links that use `..`, and skip absolute links or
+links that escape the tree.
 
 ## Safety invariants
 
@@ -368,7 +385,9 @@ tarfile API on Debian 12).
 - `replace` never modifies the running root; it snapshots it read-only first.
 - The old firmware entry remains first in `BootOrder` until `commit`; the new
   entry is tried once through `BootNext`.
-- `commit` deletes only after validation (`--force` exists, but says why).
+- `commit` deletes only after validation (`--force` exists, but says why) and
+  removes the pre-replace `@lcm-backup-*` snapshot unless `--keep-backup` is
+  passed; `--keep-old` retains the old root subvolume.
 - `/home` is reused and only written additively, with per-file backups.
 - Partition table and `efibootmgr` output are recorded in the journal.
 - No profile or bundle can execute code.
@@ -390,6 +409,9 @@ tarfile API on Debian 12).
 - openSUSE support is untested beyond detection.
 - `restore` does not merge `/etc` files, it backs up and overwrites. Review the
   dry run.
+- `restore` unpacks the full payload before verification and before the dry
+  run, so the workspace needs room for the uncompressed bundle. Use
+  `--work-dir` when `/tmp` is small or RAM-backed.
 
 ## Package mappings
 

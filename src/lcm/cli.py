@@ -434,7 +434,7 @@ def cmd_restore(args: argparse.Namespace) -> int:
             print(restore.render(report, _style(args)))
         return 1 if args.strict and report.failed else 0
 
-    loaded = bundle.load(path)
+    loaded = bundle.load(path, work_dir=getattr(args, "work_dir", None))
     try:
         report = restore.run(
             loaded,
@@ -478,7 +478,12 @@ def cmd_replace(args: argparse.Namespace) -> int:
 
 
 def cmd_commit(args: argparse.Namespace) -> int:
-    install.commit(assume_yes=args.yes, keep_old=args.keep_old, force=args.force)
+    install.commit(
+        assume_yes=args.yes,
+        keep_old=args.keep_old,
+        keep_backup=args.keep_backup,
+        force=args.force,
+    )
     return 0
 
 
@@ -723,7 +728,8 @@ def build_parser() -> argparse.ArgumentParser:
             "  lcm restore /mnt/storage/lcm-full.lcmb\n"
             "  sudo lcm restore /mnt/storage/lcm-full.lcmb --apply --yes\n"
             "  sudo lcm restore bundle.lcmb --apply --step packages\n"
-            "  sudo lcm restore bundle.lcmb --apply --try-raw --no-flatpak"
+            "  sudo lcm restore bundle.lcmb --apply --try-raw --no-flatpak\n"
+            "  lcm restore big.lcmb --work-dir /mnt/storage/lcm-work"
         ),
     )
     restore_cmd.add_argument(
@@ -746,6 +752,14 @@ def build_parser() -> argparse.ArgumentParser:
         "--try-raw",
         action="store_true",
         help="also try unmapped source package names unchanged (best effort)",
+    )
+    restore_cmd.add_argument(
+        "--work-dir",
+        metavar="DIR",
+        help=(
+            "unpack the bundle here instead of /tmp; needs enough free space "
+            "for the uncompressed payload"
+        ),
     )
     restore_cmd.add_argument(
         "--strict",
@@ -804,8 +818,8 @@ def build_parser() -> argparse.ArgumentParser:
         "commit",
         help="delete the old system after the new one validates",
         description=(
-            "Remove the old subvolume and firmware entry. Run this from the new\n"
-            "system after first-boot validation has passed."
+            "Remove the old subvolume, firmware entry, and pre-replace snapshot.\n"
+            "Run this from the new system after first-boot validation has passed."
         ),
     )
     commit.add_argument(
@@ -813,6 +827,11 @@ def build_parser() -> argparse.ArgumentParser:
     )
     commit.add_argument(
         "--keep-old", action="store_true", help="keep the old subvolume"
+    )
+    commit.add_argument(
+        "--keep-backup",
+        action="store_true",
+        help="keep the read-only pre-replace btrfs snapshot",
     )
     commit.add_argument(
         "--force", action="store_true", help="ignore failed validation"

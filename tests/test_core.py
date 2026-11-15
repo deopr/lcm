@@ -10,6 +10,7 @@ import tarfile
 import tempfile
 import unittest
 from pathlib import Path
+from unittest import mock
 
 from lcm import bundle, pkgs
 from lcm.cli import (
@@ -36,7 +37,15 @@ from lcm.detect import (
     family_of,
     parse_os_release,
 )
-from lcm.install import _old_boot_entry, _pick_kernel, _write_selinux_relabel
+from lcm.install import (
+    InstallContext,
+    Journal,
+    Runner,
+    _old_boot_entry,
+    _pick_kernel,
+    _set_boot_next,
+    _write_selinux_relabel,
+)
 from lcm.mapping import Database, MappingStats
 from lcm.profile import ConfigSpec, PackageSpec, Profile, UserSpec
 from lcm.util import LcmError, human_duration, parse_size, safe_join
@@ -179,7 +188,7 @@ class TestOldBootEntry(unittest.TestCase):
         boot = self._boot(
             [
                 self._entry("0001", "Fedora Linux"),
-                self._entry("0002", "Windows Boot Manager"),
+                self._entry("0002", "Debian"),
                 self._entry("0003", "LCM debian"),
             ],
             current="0002",
@@ -210,6 +219,69 @@ class TestOldBootEntry(unittest.TestCase):
         fedora = self._entry("0002", "Fedora Linux")
         boot = self._boot([usb, fedora], current="0001")
         self.assertEqual(_old_boot_entry(boot, "0009", "Fedora Linux"), "0002")
+
+    def test_generic_grub_label_is_accepted(self):
+        boot = self._boot(
+            [
+                self._entry("0001", "Windows Boot Manager"),
+                self._entry("0002", "GRUB"),
+            ]
+        )
+        self.assertEqual(_old_boot_entry(boot, "0009", "Fedora Linux"), "0002")
+
+    def test_windows_boot_current_is_not_the_old_system(self):
+        boot = self._boot(
+            [
+                self._entry("0001", "Windows Boot Manager"),
+                self._entry("0002", "Fedora Linux"),
+            ],
+            current="0001",
+        )
+        self.assertEqual(_old_boot_entry(boot, "0009", "Fedora Linux"), "0002")
+
+    def test_ambiguous_generic_labels_are_not_guessed(self):
+        boot = self._boot(
+            [
+                self._entry("0001", "GRUB"),
+                self._entry("0002", "Linux Boot Manager"),
+            ]
+        )
+        self.assertIsNone(_old_boot_entry(boot, "0009", "Fedora Linux"))
+
+    def test_chained_lcm_replacement_keeps_the_previous_lcm_entry(self):
+        boot = self._boot(
+            [
+                self._entry("0001", "LCM debian"),
+                self._entry("0002", "LCM arch"),
+            ],
+            current="0001",
+        )
+        self.assertEqual(_old_boot_entry(boot, "0002", "Debian"), "0001")
+
+
+class TestBootNext(unittest.TestCase):
+    def test_dry_run_arms_a_one_shot_bootnext(self):
+        journal = Journal(
+            id="test",
+            data={"state": "planned", "events": []},
+            persist=False,
+        )
+        ctx = InstallContext(
+            system=make_system(),
+            profile=Profile(name="test"),
+            target="arch",
+            target_family="arch",
+            journal=journal,
+            runner=Runner(dry_run=True),
+            dry_run=True,
+            assume_yes=True,
+        )
+        output = io.StringIO()
+        with contextlib.redirect_stdout(output):
+            _set_boot_next(ctx, "0003")
+        self.assertTrue(ctx.boot_next)
+        self.assertIn(["efibootmgr", "-n", "0003"], ctx.runner.commands)
+        self.assertIn("efibootmgr -n 0003", output.getvalue())
 
 
 class TestPickKernel(unittest.TestCase):
@@ -409,6 +481,7 @@ class TestBundle(unittest.TestCase):
             self.assertEqual(bundle.verify(written), [])
             data = bundle.inspect(written)
             self.assertEqual(data["manifest"]["format"], 1)
+            self.assertGreater(data["manifest"]["staging_bytes"], 0)
             loaded = bundle.load(written)
             try:
                 self.assertEqual(loaded.profile.name, "bundle-test")
@@ -416,6 +489,69 @@ class TestBundle(unittest.TestCase):
                 self.assertFalse(loaded.manifest["counts"]["native"] == 0)
             finally:
                 loaded.cleanup()
+
+    def test_load_unpacks_into_requested_work_dir(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            out = root / "workdir.lcmb"
+            bundle.create(
+                out,
+                Profile(name="workdir"),
+                {},
+                make_system(),
+                include_payload=False,
+            )
+            work = root / "scratch"
+            work.mkdir()
+            loaded = bundle.load(out, work_dir=work)
+            try:
+                self.assertEqual(loaded.root.parent, work)
+            finally:
+                loaded.cleanup()
+            self.assertEqual(list(work.iterdir()), [])
+
+    def test_load_refuses_a_workspace_without_space(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            out = root / "tiny.lcmb"
+            bundle.create(
+                out,
+                Profile(name="tiny"),
+                {},
+                make_system(),
+                include_payload=False,
+            )
+            work = root / "scratch"
+            work.mkdir()
+            with mock.patch(
+                "lcm.bundle.shutil.disk_usage",
+                return_value=mock.Mock(free=0),
+            ):
+                with self.assertRaises(LcmError) as caught:
+                    bundle.load(out, work_dir=work)
+            message = str(caught.exception)
+            self.assertIn("not enough space", message)
+            self.assertIn("--work-dir", message)
+
+    def test_staging_defaults_to_the_output_filesystem(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            out = Path(tmp) / "default-stage.lcmb"
+            seen = []
+            real_mkdtemp = tempfile.mkdtemp
+
+            def record(*args, **kwargs):
+                seen.append(kwargs.get("dir"))
+                return real_mkdtemp(*args, **kwargs)
+
+            with mock.patch("lcm.bundle.tempfile.mkdtemp", side_effect=record):
+                bundle.create(
+                    out,
+                    Profile(name="default-stage"),
+                    {},
+                    make_system(),
+                    include_payload=False,
+                )
+            self.assertEqual(Path(seen[0]), out.parent)
 
     def test_staging_dir_is_used_and_cleaned(self):
         with tempfile.TemporaryDirectory() as tmp, tempfile.TemporaryDirectory() as stage:
@@ -516,6 +652,13 @@ class TestBundle(unittest.TestCase):
             self.assertTrue(problems)
             self.assertTrue(any("mismatch" in item for item in problems))
 
+            work = Path(tmp) / "work"
+            work.mkdir()
+            with self.assertRaises(LcmError) as caught:
+                bundle.load(bad, work_dir=work)
+            self.assertIn("verification failed", str(caught.exception))
+            self.assertEqual(list(work.iterdir()), [])
+
 
 class TestHomeCapture(unittest.TestCase):
     def test_full_home_includes_user_data_and_skips_junk(self):
@@ -535,6 +678,7 @@ class TestHomeCapture(unittest.TestCase):
                 ".local/share/Trash/files/deleted",
                 ".lcm-backup/stale.tar",
                 ".config/google-chrome/Default/Cache/blob",
+                "Projects/cache/keep.txt",
             ]
             for relative in files:
                 path = home / relative
@@ -552,6 +696,7 @@ class TestHomeCapture(unittest.TestCase):
                 ".thunderbird/prefs.js",
                 ".config/app/settings.ini",
                 ".local/share/fonts/font.ttf",
+                "Projects/cache/keep.txt",
             ):
                 self.assertIn(relative, names)
 
@@ -572,6 +717,17 @@ class TestHomeCapture(unittest.TestCase):
                     ),
                     f"{prefix} leaked into the full-home capture",
                 )
+
+    def test_cache_excludes_are_scoped_to_known_app_trees(self):
+        patterns = sorted(bundle.BUILTIN_EXCLUDES)
+        self.assertFalse(bundle._excluded("Projects/cache/keep.txt", patterns))
+        self.assertFalse(bundle._excluded("data/Cache/results.bin", patterns))
+        self.assertTrue(
+            bundle._excluded(
+                ".config/google-chrome/Default/Cache/blob", patterns
+            )
+        )
+        self.assertTrue(bundle._excluded(".cache/pip/wheel", patterns))
 
     def test_overlapping_patterns_do_not_duplicate_members(self):
         with tempfile.TemporaryDirectory() as tmp:
@@ -821,6 +977,16 @@ class TestCliParsing(unittest.TestCase):
         args = build_parser().parse_args(["restore", "bundle.lcmb", "--try-raw"])
         self.assertTrue(args.try_raw)
 
+    def test_restore_work_dir_option(self):
+        args = build_parser().parse_args(
+            ["restore", "bundle.lcmb", "--work-dir", "/mnt/scratch"]
+        )
+        self.assertEqual(args.work_dir, "/mnt/scratch")
+
+    def test_commit_keep_backup_option(self):
+        args = build_parser().parse_args(["commit", "--keep-backup"])
+        self.assertTrue(args.keep_backup)
+
 
 class TestRestoreFormatDetection(unittest.TestCase):
     def test_bundle_magic_and_yaml(self):
@@ -923,6 +1089,54 @@ class TestRestoreExtraction(unittest.TestCase):
             self.assertTrue((home / ".config/rel").is_symlink())
             self.assertFalse((home / ".config/abs").is_symlink())
             self.assertEqual(count, 3)
+            self.assertTrue(any("unsafe symlink" in note for note in notes))
+
+    def test_relative_parent_symlink_inside_root_is_kept(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            tar_path = root / "payload.tar"
+            self._tar(
+                tar_path,
+                [
+                    (".config", "dir", ""),
+                    (".config/systemd/user", "dir", ""),
+                    (".config/real.service", "file", "unit=1\n"),
+                    (
+                        ".config/systemd/user/link.service",
+                        "symlink",
+                        "../../real.service",
+                    ),
+                ],
+            )
+            home = root / "home"
+            home.mkdir()
+            count, notes = _extract(
+                tar_path, home, root / "backup", [], apply=True
+            )
+            link = home / ".config/systemd/user/link.service"
+            self.assertTrue(link.is_symlink())
+            self.assertEqual(link.read_text(encoding="utf-8"), "unit=1\n")
+            self.assertEqual(count, 4)
+            self.assertEqual(notes, [])
+
+    def test_relative_symlink_that_escapes_root_is_skipped(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            tar_path = root / "payload.tar"
+            self._tar(
+                tar_path,
+                [
+                    (".config", "dir", ""),
+                    (".config/escape", "symlink", "../../../etc/passwd"),
+                ],
+            )
+            home = root / "home"
+            home.mkdir()
+            count, notes = _extract(
+                tar_path, home, root / "backup", [], apply=True
+            )
+            self.assertFalse((home / ".config/escape").is_symlink())
+            self.assertEqual(count, 1)
             self.assertTrue(any("unsafe symlink" in note for note in notes))
 
     def test_excluded_paths_are_not_extracted(self):

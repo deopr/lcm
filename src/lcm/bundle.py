@@ -23,7 +23,14 @@ from typing import Callable
 
 from lcm import __version__
 from lcm.profile import Profile
-from lcm.util import LcmError, run_ok, safe_join, timestamp, utc_now
+from lcm.util import (
+    LcmError,
+    human_bytes,
+    run_ok,
+    safe_join,
+    timestamp,
+    utc_now,
+)
 
 BUNDLE_FORMAT = 1
 MANIFEST = "manifest.json"
@@ -54,12 +61,13 @@ class ProgressEvent:
 ProgressCallback = Callable[[ProgressEvent], None]
 CaptureReporter = Callable[[int, int, str | None], None]
 
+# Cache names that are unambiguous at any depth.  Generic names such as
+# "cache" or "Cache" are deliberately absent: a project directory often uses
+# those names, and skipping it would silently drop real data.
 BUILTIN_EXCLUDES = {
     ".cache",
     ".lcm-backup",
     ".lcm-staging-*",
-    "Cache",
-    "cache",
     "CachedData",
     "GPUCache",
     "Code Cache",
@@ -72,6 +80,16 @@ BUILTIN_EXCLUDES = {
     "SingletonLock",
     "SingletonCookie",
     "SingletonSocket",
+    # Browser and editor caches use a generic "Cache" directory, but only
+    # inside their own configuration trees.
+    ".config/*/Cache",
+    ".config/*/CachedData",
+    ".config/*/*/Cache",
+    ".config/*/*/CachedData",
+    ".local/share/*/Cache",
+    ".mozilla/firefox/*/cache2",
+    ".mozilla/firefox/*/startupCache",
+    ".thunderbird/*/cache2",
 }
 
 
@@ -340,7 +358,7 @@ def _tar_tree(
     *,
     label: str | None = None,
     progress: ProgressCallback | None = None,
-) -> None:
+) -> _CaptureStats:
     out.parent.mkdir(parents=True, exist_ok=True)
     phase_label = label or out.stem
     started = time.monotonic()
@@ -400,6 +418,7 @@ def _tar_tree(
                     emit,
                 )
     emit(stats.bytes, stats.files, finished=True)
+    return stats
 
 
 def _checksums(
@@ -637,13 +656,11 @@ def create(
                 "out_of_tree_modules": system.hardware.out_of_tree_modules,
             },
         }
-        (staging / MANIFEST).write_text(
-            json.dumps(manifest, indent=2, sort_keys=True) + "\n", encoding="utf-8"
-        )
         (staging / PACKAGES).write_text(
             json.dumps(packages, indent=2, sort_keys=True) + "\n", encoding="utf-8"
         )
 
+        payload_info: dict[str, dict] = {}
         if include_payload:
             home = Path(profile.users[0].home) if profile.users and profile.users[0].home else Path.home()
             etc = Path("/etc")
@@ -651,7 +668,7 @@ def create(
             for user in profile.users:
                 user_home = Path(user.home) if user.home else home
                 tar_path = staging / "payload" / f"home-{user.name}.tar"
-                _tar_tree(
+                stats = _tar_tree(
                     user_home,
                     profile.config.home,
                     [
@@ -662,7 +679,11 @@ def create(
                     label=f"home:{user.name}",
                     progress=progress,
                 )
-            _tar_tree(
+                payload_info[f"home:{user.name}"] = {
+                    "files": stats.files,
+                    "bytes": stats.bytes,
+                }
+            stats = _tar_tree(
                 etc,
                 profile.config.etc,
                 _skip_patterns(etc, own_paths),
@@ -670,6 +691,15 @@ def create(
                 label="etc",
                 progress=progress,
             )
+            payload_info["etc"] = {"files": stats.files, "bytes": stats.bytes}
+
+        manifest["payload"] = payload_info
+        manifest["staging_bytes"] = sum(
+            path.stat().st_size for path in staging.rglob("*") if path.is_file()
+        )
+        (staging / MANIFEST).write_text(
+            json.dumps(manifest, indent=2, sort_keys=True) + "\n", encoding="utf-8"
+        )
 
         (staging / CHECKSUMS).write_text(
             _checksums(staging, progress=progress), encoding="utf-8"
@@ -728,6 +758,34 @@ def _open_bundle(path: Path) -> tarfile.TarFile:
         raise LcmError(f"cannot open bundle: {path}: {exc}") from exc
 
 
+def _verify_extracted(root: Path) -> list[str]:
+    """Check a freshly unpacked bundle against its checksum file."""
+    try:
+        text = (root / CHECKSUMS).read_text(encoding="utf-8")
+    except OSError:
+        return ["bundle has no checksums.sha256"]
+
+    problems: list[str] = []
+    for line in text.splitlines():
+        if not line.strip():
+            continue
+        digest, _, relative = line.partition("  ")
+        if not relative:
+            problems.append(f"malformed checksum line: {line!r}")
+            continue
+        try:
+            path = safe_join(root, relative)
+        except LcmError as exc:
+            problems.append(f"unsafe checksum path: {relative}: {exc}")
+            continue
+        if not path.is_file():
+            problems.append(f"missing file: {relative}")
+            continue
+        if _sha256(path) != digest:
+            problems.append(f"checksum mismatch: {relative}")
+    return problems
+
+
 def verify(path: str | Path) -> list[str]:
     """Verify checksums by streaming members out of the archive.
 
@@ -769,19 +827,149 @@ def verify(path: str | Path) -> list[str]:
     return problems
 
 
-def load(path: str | Path, *, verify_checksums: bool = True) -> Bundle:
-    path = Path(path)
-    problems = verify(path) if verify_checksums else []
-    if problems:
-        raise LcmError("bundle verification failed:\n  " + "\n  ".join(problems))
+def _peek_manifest(path: Path) -> dict | None:
+    """Read manifest.json without decompressing the payload.
 
-    staging = Path(tempfile.mkdtemp(prefix="lcm-load-"))
+    Streaming mode stops as soon as the payload directory is reached, so this
+    costs a few megabytes even for a bundle that is tens of gigabytes.
+    """
+    try:
+        with tarfile.open(path, "r|*") as archive:
+            for member in archive:
+                if member.name == MANIFEST and member.isfile():
+                    handle = archive.extractfile(member)
+                    if handle is None:
+                        return None
+                    return json.loads(handle.read().decode("utf-8"))
+                if member.name.startswith("payload/"):
+                    return None
+    except (OSError, tarfile.TarError, ValueError):
+        return None
+    return None
+
+
+def _workspace_need(path: Path, manifest: dict | None) -> int:
+    """Estimate the disk space needed to unpack a bundle.
+
+    New bundles record the exact staged size.  Older bundles fall back to
+    twice the compressed size, which is conservative for home directories
+    containing a mix of text and media.
+    """
+    if isinstance(manifest, dict):
+        staged = manifest.get("staging_bytes")
+        if isinstance(staged, int) and staged > 0:
+            return staged + 128 * 1024 * 1024
+        payload = manifest.get("payload")
+        if isinstance(payload, dict):
+            total = sum(
+                int(item.get("bytes", 0))
+                for item in payload.values()
+                if isinstance(item, dict)
+            )
+            if total > 0:
+                return total + 128 * 1024 * 1024
+    try:
+        compressed = path.stat().st_size
+    except OSError:
+        compressed = 0
+    return max(compressed * 2, 64 * 1024 * 1024)
+
+
+def _workspace_candidates(
+    path: Path, work_dir: str | Path | None
+) -> list[Path]:
+    if work_dir is not None:
+        return [Path(os.path.abspath(Path(work_dir).expanduser()))]
+    candidates: list[Path] = []
+    tmpdir = os.environ.get("TMPDIR")
+    for item in (tmpdir, "/var/tmp", str(path.parent), "/tmp"):
+        if not item:
+            continue
+        candidate = Path(os.path.abspath(os.path.expanduser(item)))
+        if candidate not in candidates:
+            candidates.append(candidate)
+    return candidates
+
+
+def _choose_workspace(
+    path: Path, work_dir: str | Path | None, need: int
+) -> Path:
+    """Pick a disk-backed workspace before unpacking a large bundle.
+
+    The system /tmp is commonly a RAM-backed tmpfs.  Defaulting to it can
+    exhaust memory or fail halfway through a full-home restore, so candidates
+    are checked for free space and /var/tmp or the bundle's own filesystem are
+    preferred over /tmp.
+    """
+    explicit = work_dir is not None
+    checked: list[str] = []
+    for candidate in _workspace_candidates(path, work_dir):
+        try:
+            if not candidate.exists():
+                if explicit:
+                    candidate.mkdir(parents=True, exist_ok=True)
+                else:
+                    checked.append(f"{candidate}: missing")
+                    continue
+            if not candidate.is_dir():
+                checked.append(f"{candidate}: not a directory")
+                continue
+            if not os.access(candidate, os.W_OK):
+                checked.append(f"{candidate}: not writable")
+                continue
+            free = shutil.disk_usage(candidate).free
+        except OSError as exc:
+            checked.append(f"{candidate}: {exc}")
+            continue
+        checked.append(f"{candidate}: {human_bytes(free)} free")
+        if free >= need:
+            return candidate
+
+    detail = "\n".join(f"  - {line}" for line in checked) or "  - no candidates"
+    raise LcmError(
+        "not enough space to unpack this bundle\n"
+        f"  needed: {human_bytes(need)}\n"
+        f"  checked:\n{detail}\n"
+        "Choose a workspace with enough free space:\n"
+        "  lcm restore <bundle> --work-dir /path/with/space\n"
+        "or set TMPDIR to such a directory before running the command."
+    )
+
+
+def load(
+    path: str | Path,
+    *,
+    verify_checksums: bool = True,
+    work_dir: str | Path | None = None,
+) -> Bundle:
+    path = Path(path)
+    manifest_hint = _peek_manifest(path)
+    need = _workspace_need(path, manifest_hint)
+    workspace = _choose_workspace(path, work_dir, need)
+
+    staging = Path(tempfile.mkdtemp(prefix="lcm-load-", dir=workspace))
     try:
         with _open_bundle(path) as archive:
             _safe_extract(archive, staging)
+        if verify_checksums:
+            problems = _verify_extracted(staging)
+            if problems:
+                raise LcmError(
+                    "bundle verification failed:\n  " + "\n  ".join(problems)
+                )
         manifest = json.loads((staging / MANIFEST).read_text(encoding="utf-8"))
         packages = json.loads((staging / PACKAGES).read_text(encoding="utf-8"))
         profile = Profile.load(staging / PROFILE)
+    except LcmError:
+        shutil.rmtree(staging, ignore_errors=True)
+        raise
+    except (OSError, tarfile.TarError) as exc:
+        shutil.rmtree(staging, ignore_errors=True)
+        raise LcmError(
+            f"could not unpack bundle into {workspace}: {exc}\n"
+            "check free space and permissions; choose another location with\n"
+            "  lcm restore <bundle> --work-dir /path/with/space"
+        ) from exc
     except Exception:
         shutil.rmtree(staging, ignore_errors=True)
         raise

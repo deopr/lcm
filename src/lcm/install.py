@@ -1418,6 +1418,53 @@ def _removable_entry(entry: BootEntry) -> bool:
     )
 
 
+def _foreign_entry(entry: BootEntry, new_entry: str | None) -> bool:
+    """True for entries LCM must never delete as the old Linux system."""
+    if entry.number == new_entry or _removable_entry(entry):
+        return True
+    label = entry.label.strip().lower()
+    loader = entry.loader.strip().lower().replace("/", "\\")
+    return (
+        "windows boot manager" in label
+        or "\\efi\\microsoft\\" in loader
+    )
+
+
+def _label_contains(label: str, word: str) -> bool:
+    """Match a whole word, so 'arch' does not match 'search'."""
+    return (
+        re.search(
+            rf"(?<![a-z0-9]){re.escape(word)}(?![a-z0-9])",
+            label.lower(),
+        )
+        is not None
+    )
+
+
+# Labels commonly used by Linux boot managers.  They do not name a distro, but
+# they are still the entry that launched the running system.
+_LINUX_BOOT_LABELS = (
+    "linux",
+    "grub",
+    "systemd",
+    "fedora",
+    "debian",
+    "ubuntu",
+    "arch",
+    "manjaro",
+    "cachyos",
+    "opensuse",
+    "suse",
+    "pika",
+    "pop!_os",
+    "mint",
+    "rhel",
+    "centos",
+    "rocky",
+    "alma",
+)
+
+
 def _old_boot_entry(
     boot: Boot, new_entry: str | None, source_name: str = ""
 ) -> str | None:
@@ -1430,40 +1477,50 @@ def _old_boot_entry(
     back to the running distribution's name, not to whichever entry happens to
     be first in BootOrder.
     """
-    current = boot.boot_current
+    candidates = [
+        entry for entry in boot.entries if not _foreign_entry(entry, new_entry)
+    ]
     current_entry = next(
-        (entry for entry in boot.entries if entry.number == current), None
+        (entry for entry in candidates if entry.number == boot.boot_current), None
     )
-    if (
-        current_entry is not None
-        and current != new_entry
-        and not _removable_entry(current_entry)
-    ):
-        return current
+    if current_entry is not None:
+        return current_entry.number
 
+    generic = {"linux", "gnu", "gnu/linux", "os"}
     needles: list[str] = []
     for word in [source_name, *source_name.split()]:
         needle = word.strip().lower()
-        if needle and needle not in needles:
+        if needle and needle not in needles and needle not in generic:
             needles.append(needle)
-    for entry in boot.entries:
-        if entry.number == new_entry or _removable_entry(entry):
-            continue
-        if any(needle in entry.label.lower() for needle in needles):
+    for entry in candidates:
+        if any(_label_contains(entry.label, needle) for needle in needles):
             return entry.number
+
+    # GRUB and systemd-boot often label their entry "GRUB" or
+    # "Linux Boot Manager" instead of a distro name.  Only use that fallback
+    # when it identifies one entry; several Linux entries are ambiguous.
+    labelled = [
+        entry
+        for entry in candidates
+        if any(_label_contains(entry.label, word) for word in _LINUX_BOOT_LABELS)
+    ]
+    if len(labelled) == 1:
+        return labelled[0].number
+
+    # If exactly one plausible entry remains, it is the only possible old
+    # system.  With several candidates, guessing risks deleting the wrong one.
+    if len(candidates) == 1:
+        return candidates[0].number
     return None
 
 
 def _set_boot_next(ctx: InstallContext, number: str) -> None:
     """Try the new entry once, falling back to the saved BootOrder on failure."""
-    if ctx.runner.dry_run:
-        print(f"    $ efibootmgr -n {number}")
-        ctx.boot_next = True
-        return
     ok, _, err = ctx.runner.ok(["efibootmgr", "-n", number])
     if ok:
         ctx.boot_next = True
-        ctx.journal.record("boot_next", entry=number)
+        if not ctx.runner.dry_run:
+            ctx.journal.record("boot_next", entry=number)
     else:
         print(
             "warning: could not set BootNext; pick the LCM entry in the firmware "
@@ -1656,7 +1713,13 @@ def _read_validation() -> dict[str, str]:
     return {}
 
 
-def commit(*, assume_yes: bool = False, keep_old: bool = False, force: bool = False) -> None:
+def commit(
+    *,
+    assume_yes: bool = False,
+    keep_old: bool = False,
+    keep_backup: bool = False,
+    force: bool = False,
+) -> None:
     require_root("lcm commit")
     system = detect_system()
     candidates = [
@@ -1684,8 +1747,19 @@ def commit(*, assume_yes: bool = False, keep_old: bool = False, force: bool = Fa
         )
 
     if not assume_yes:
-        if not confirm(
-            f"Delete the old subvolume {journal.data.get('old_subvol')} and its boot entry?",
+        actions = []
+        if not keep_old:
+            actions.append(
+                f"old subvolume {journal.data.get('old_subvol')}"
+            )
+        backup_name = str(journal.data.get("backup_subvol") or "")
+        if not keep_backup and backup_name:
+            actions.append(f"pre-replace snapshot {backup_name}")
+        old_entry = journal.data.get("old_boot_entry")
+        if old_entry:
+            actions.append(f"boot entry {old_entry}")
+        if actions and not confirm(
+            "Delete " + ", ".join(actions) + "?",
             assume_yes=False,
         ):
             raise LcmError("aborted")
@@ -1703,6 +1777,11 @@ def commit(*, assume_yes: bool = False, keep_old: bool = False, force: bool = Fa
             old = POOL_MOUNT / str(journal.data.get("old_subvol") or "@")
             if old.exists():
                 run(["btrfs", "subvolume", "delete", str(old)])
+        if not keep_backup:
+            backup_name = str(journal.data.get("backup_subvol") or "")
+            backup = POOL_MOUNT / backup_name if backup_name else None
+            if backup is not None and backup.exists():
+                run(["btrfs", "subvolume", "delete", str(backup)])
         old_entry = journal.data.get("old_boot_entry")
         if old_entry:
             run_ok(["efibootmgr", "-b", str(old_entry), "-B"])
@@ -1716,8 +1795,20 @@ def commit(*, assume_yes: bool = False, keep_old: bool = False, force: bool = Fa
         order = [new_entry] + [entry for entry in order if entry != new_entry]
         _set_boot_order(order)
 
-    journal.set_state("committed", commit_time=utc_now(), kept_old=keep_old)
-    print("Committed. The old root subvolume is gone." if not keep_old else "Committed; old subvolume kept.")
+    journal.set_state(
+        "committed",
+        commit_time=utc_now(),
+        kept_old=keep_old,
+        kept_backup=keep_backup,
+    )
+    if keep_old:
+        print("Committed; old subvolume kept.")
+    else:
+        print("Committed. The old root subvolume is gone.")
+    if keep_backup:
+        backup_name = journal.data.get("backup_subvol")
+        if backup_name:
+            print(f"Pre-replace snapshot kept: {backup_name}")
 
 
 def rollback(*, entry: str | None = None) -> None:
@@ -1779,7 +1870,11 @@ def recover(*, cleanup: str | None = None, assume_yes: bool = False) -> str:
         run(["mount", "-o", "subvolid=5", pool, str(POOL_MOUNT)])
         mounted = True
     try:
-        for name in (subvol, str(journal.data.get("new_boot_subvol") or "")):
+        for name in (
+            subvol,
+            str(journal.data.get("new_boot_subvol") or ""),
+            str(journal.data.get("backup_subvol") or ""),
+        ):
             if not name:
                 continue
             path = POOL_MOUNT / name

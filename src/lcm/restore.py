@@ -113,6 +113,25 @@ def _lexical_path(root: Path, name: str) -> Path:
     return parent / relative.name
 
 
+def _validate_symlink(member_name: str, link: str, dest_root: Path) -> None:
+    """Allow relative links that stay inside the restore root.
+
+    Absolute links and relative links that climb out of the root are refused.
+    A link such as ``../.config/real.conf`` is safe when its normalized target
+    remains under the destination, and preserving it matters for systemd user
+    units and similar dotfile layouts.
+    """
+    if not link or link.startswith("/") or link.startswith("\\"):
+        raise LcmError(f"unsafe symlink target: {member_name} -> {link}")
+    parent = Path(member_name).parent
+    relative = os.path.normpath(os.path.join(str(parent), link))
+    if relative == ".." or relative.startswith("../") or Path(relative).is_absolute():
+        raise LcmError(f"unsafe symlink target: {member_name} -> {link}")
+    # Follow any existing components to make sure an earlier link cannot
+    # redirect this target outside the destination root.
+    safe_join(dest_root, relative)
+
+
 def _remove_for_member(dest: Path, member: tarfile.TarInfo) -> None:
     if dest.is_symlink() or (dest.exists() and not dest.is_dir()):
         dest.unlink()
@@ -132,8 +151,7 @@ def _extract_member(
 
     if member.issym():
         link = member.linkname or ""
-        if link.startswith("/") or ".." in Path(link).parts:
-            raise LcmError(f"unsafe symlink target: {member.name} -> {link}")
+        _validate_symlink(member.name, link, dest_root)
         if dest.exists() or dest.is_symlink():
             _backup_file(dest, backup_root, member.name)
             _remove_for_member(dest, member)
