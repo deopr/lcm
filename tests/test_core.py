@@ -904,13 +904,13 @@ class TestExportProgress(unittest.TestCase):
     def test_summary_lists_every_phase(self):
         progress = _ExportProgress()
         progress.phases = [
-            ("capture home:deopr", 1122),
+            ("capture home:alice", 1122),
             ("verify checksums", 132),
             ("compress bundle", 65),
         ]
         summary = progress.render_summary()
         self.assertIn("Phase timings:", summary)
-        self.assertIn("capture home:deopr", summary)
+        self.assertIn("capture home:alice", summary)
         self.assertIn("18m 42s", summary)
         self.assertIn("1m 05s", summary)
         self.assertIn("total", summary)

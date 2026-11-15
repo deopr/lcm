@@ -611,7 +611,7 @@ def build_parser() -> argparse.ArgumentParser:
         epilog=(
             "Examples:\n"
             "  lcm check --target arch\n"
-            "  lcm check --target debian --profile my.lcm.yaml"
+            "  lcm check --target debian --profile workstation.lcm.yaml"
         ),
     )
     check.add_argument(
@@ -630,7 +630,7 @@ def build_parser() -> argparse.ArgumentParser:
         epilog=(
             "Examples:\n"
             "  lcm plan --target arch\n"
-            "  lcm plan --target debian --profile my.lcm.yaml"
+            "  lcm plan --target debian --profile workstation.lcm.yaml"
         ),
     )
     plan.add_argument(

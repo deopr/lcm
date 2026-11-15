@@ -22,7 +22,7 @@ target:
   release: ""
 
 users:
-  - name: deopr
+  - name: alice
     uid: 1000
     groups: [wheel, video, audio, input, render, kvm]
     shell: /bin/bash
